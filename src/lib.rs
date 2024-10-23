@@ -1,5 +1,7 @@
 //! Database utils
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use heed::{BytesDecode, BytesEncode};
 use thiserror::Error;
 //#[cfg(feature = "serde")]
@@ -57,7 +59,12 @@ impl BytesEncode<'_> for UnitKey {
 }
 
 pub mod rwtxn {
+    #[cfg(feature = "observe")]
+    use std::{collections::HashMap, sync::Arc};
     use std::{ops::DerefMut as _, path::Path};
+
+    #[cfg(feature = "observe")]
+    use tokio::sync::watch;
 
     pub mod error {
         use std::path::PathBuf;
@@ -84,14 +91,21 @@ pub mod rwtxn {
     pub struct RwTxn<'a> {
         pub(crate) inner: heed::RwTxn<'a>,
         pub(crate) db_dir: &'a Path,
+        #[cfg(feature = "observe")]
+        pub(crate) pending_writes: HashMap<Arc<str>, watch::Sender<()>>,
     }
 
     impl RwTxn<'_> {
         pub fn commit(self) -> Result<(), error::Commit> {
-            self.inner.commit().map_err(|err| error::Commit {
+            let () = self.inner.commit().map_err(|err| error::Commit {
                 db_dir: self.db_dir.to_owned(),
                 source: err,
-            })
+            })?;
+            #[cfg(feature = "observe")]
+            self.pending_writes
+                .iter()
+                .for_each(|(_db_name, watch_tx)| watch_tx.send_replace(()));
+            Ok(())
         }
     }
 
@@ -117,7 +131,7 @@ pub mod rwtxn {
 pub use rwtxn::{Error as RwTxnError, RwTxn};
 
 pub mod env {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{path::Path, sync::Arc};
 
     use heed::{DatabaseOpenOptions, EnvOpenOptions, RoTxn};
 
@@ -176,7 +190,7 @@ pub mod env {
     #[derive(Clone, Debug)]
     pub struct Env {
         inner: heed::Env,
-        path: Arc<PathBuf>,
+        path: Arc<Path>,
     }
 
     impl Env {
@@ -184,20 +198,25 @@ pub mod env {
         /// See [`heed::EnvOpenOptions::open`]
         pub unsafe fn open(
             opts: &EnvOpenOptions,
-            path: PathBuf,
+            path: &Path,
         ) -> Result<Self, error::OpenEnv> {
-            let inner = match opts.open(&path) {
+            let inner = match opts.open(path) {
                 Ok(env) => env,
-                Err(err) => return Err(error::OpenEnv { path, source: err }),
+                Err(err) => {
+                    return Err(error::OpenEnv {
+                        path: path.to_owned(),
+                        source: err,
+                    })
+                }
             };
             Ok(Self {
                 inner,
-                path: Arc::new(path),
+                path: Arc::from(path),
             })
         }
 
         #[inline(always)]
-        pub fn path(&self) -> &Arc<PathBuf> {
+        pub fn path(&self) -> &Arc<Path> {
             &self.path
         }
 
@@ -210,7 +229,7 @@ pub mod env {
 
         pub fn read_txn(&self) -> Result<RoTxn<'_>, error::ReadTxn> {
             self.inner.read_txn().map_err(|err| error::ReadTxn {
-                db_dir: (*self.path).clone(),
+                db_dir: (*self.path).to_owned(),
                 source: err,
             })
         }
@@ -218,12 +237,14 @@ pub mod env {
         pub fn write_txn(&self) -> Result<RwTxn<'_>, error::WriteTxn> {
             let inner =
                 self.inner.write_txn().map_err(|err| error::WriteTxn {
-                    db_dir: (*self.path).clone(),
+                    db_dir: (*self.path).to_owned(),
                     source: err,
                 })?;
             Ok(RwTxn {
                 inner,
                 db_dir: &self.path,
+                #[cfg(feature = "observe")]
+                pending_writes: Default::default(),
             })
         }
     }

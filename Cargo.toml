@@ -1,6 +1,6 @@
 [package]
 name = "sneed"
-version = "0.0.0"
+version = "0.0.1"
 authors = ["Ash Manning <10554686+A-Manning@users.noreply.github.com>"]
 edition = "2021"
 rust-version = "1.74.1"
@@ -10,6 +10,10 @@ repository = "https://github.com/A-Manning/sneed"
 license = "Apache-2.0"
 keywords = ["database", "heed", "lmdb", "storage", "typed"]
 categories = ["database", "data-structures"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 educe = { version = "0.6.0", default-features = false, features = ["Clone", "Debug"]}
@@ -23,11 +27,14 @@ strum = { version = "0.20", features = ["derive"]}
 syn = { version = "1.0.1", default-features = false }
 thiserror = "1.0.41"
 
-# serde = { version = "1.0.151", features = ["derive"], optional = true }
+[dependencies.tokio]
+version = "1.37.0"
+default-features = false
+features = ["sync"]
+optional = true
 
 [features]
-# default = ["serde"]
-# serde = ["dep:serde", "heed/serde"]
+observe = ["dep:tokio"]
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

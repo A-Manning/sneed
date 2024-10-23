@@ -1,6 +1,6 @@
 //! Database types
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use educe::Educe;
 use fallible_iterator::{FallibleIterator, IteratorExt as _};
@@ -8,6 +8,8 @@ use heed::{
     types::LazyDecode, BytesDecode, BytesEncode, Comparator, DatabaseFlags,
     DefaultComparator, PutFlags, RoTxn,
 };
+#[cfg(feature = "observe")]
+use tokio::sync::watch;
 
 use crate::{env, Env, RwTxn};
 
@@ -36,8 +38,10 @@ where
 #[educe(Clone, Debug)]
 struct DbWrapper<KC, DC, C = DefaultComparator> {
     heed_db: heed::Database<KC, DC, C>,
-    name: String,
-    path: Arc<PathBuf>,
+    name: Arc<str>,
+    path: Arc<Path>,
+    #[cfg(feature = "observe")]
+    watch: (watch::Sender<()>, watch::Receiver<()>),
 }
 
 impl<KC, DC, C> DbWrapper<KC, DC, C> {
@@ -45,7 +49,7 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
     fn create(
         env: &Env,
         rwtxn: &mut RwTxn<'_>,
-        name: String,
+        name: &str,
         flags: Option<DatabaseFlags>,
     ) -> Result<Self, env::error::CreateDb>
     where
@@ -54,25 +58,23 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         C: Comparator + 'static,
     {
         let mut db_opts =
-            env.database_options().name(&name).types().key_comparator();
+            env.database_options().name(name).types().key_comparator();
         if let Some(flags) = flags {
             db_opts.flags(flags);
         }
         let path = env.path().clone();
-        let heed_db = match db_opts.create(rwtxn) {
-            Ok(heed_db) => heed_db,
-            Err(err) => {
-                return Err(env::error::CreateDb {
-                    name,
-                    path: (*path).clone(),
-                    source: err,
-                })
-            }
-        };
+        let heed_db =
+            db_opts.create(rwtxn).map_err(|err| env::error::CreateDb {
+                name: name.to_owned(),
+                path: (*path).to_owned(),
+                source: err,
+            })?;
         Ok(Self {
             heed_db,
-            name,
+            name: Arc::from(name),
             path,
+            #[cfg(feature = "observe")]
+            watch: watch::channel(()),
         })
     }
 
@@ -93,8 +95,8 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                     .map(|key_bytes| key_bytes.to_vec());
                 Err(error::TryGet {
-                    db_name: self.name.clone(),
-                    db_path: (*self.path).clone(),
+                    db_name: (*self.name).to_owned(),
+                    db_path: (*self.path).to_owned(),
                     key_bytes,
                     source: err,
                 })
@@ -110,16 +112,21 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
     where
         KC: BytesEncode<'a>,
     {
-        self.heed_db.delete(rwtxn, key).map_err(|err| {
+        let res = self.heed_db.delete(rwtxn, key).map_err(|err| {
             let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                 .map(|key_bytes| key_bytes.to_vec());
             error::Delete {
-                db_name: self.name.clone(),
-                db_path: (*self.path).clone(),
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
                 key_bytes,
                 source: err,
             }
-        })
+        })?;
+        #[cfg(feature = "observe")]
+        let _watch_tx: Option<watch::Sender<_>> = rwtxn
+            .pending_writes
+            .insert(self.name.clone(), self.watch.0.clone());
+        Ok(res)
     }
 
     #[allow(clippy::type_complexity)]
@@ -132,8 +139,8 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         DC: BytesDecode<'txn>,
     {
         self.heed_db.first(rotxn).map_err(|err| error::First {
-            db_name: self.name.clone(),
-            db_path: (*self.path).clone(),
+            db_name: (*self.name).to_owned(),
+            db_path: (*self.path).to_owned(),
             source: err,
         })
     }
@@ -155,13 +162,13 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 .into_iter()
                 .flatten()
                 .map({
-                    let db_path = self.path.clone();
+                    let db_path = &*self.path;
                     let name = self.name();
-                    move |item| match item {
+                    |item| match item {
                         Ok((_key, value)) => Ok(value),
                         Err(err) => Err(error::IterItem {
                             db_name: name.to_owned(),
-                            db_path: (*db_path).clone(),
+                            db_path: db_path.to_owned(),
                             source: err,
                         }),
                     }
@@ -171,8 +178,8 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                     .map(|key_bytes| key_bytes.to_vec());
                 Err(error::IterDuplicatesInit {
-                    db_name: self.name.clone(),
-                    db_path: (*self.path).clone(),
+                    db_name: (*self.name).to_owned(),
+                    db_path: (*self.path).to_owned(),
                     key_bytes,
                     source: err,
                 })
@@ -196,17 +203,17 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
     {
         match self.heed_db.iter(rotxn) {
             Ok(it) => Ok(it.transpose_into_fallible().map_err({
-                let db_path = self.path.clone();
+                let db_path = &*self.path;
                 let name = self.name();
-                move |err| error::IterItem {
+                |err| error::IterItem {
                     db_name: name.to_owned(),
-                    db_path: (*db_path).clone(),
+                    db_path: db_path.to_owned(),
                     source: err,
                 }
             })),
             Err(err) => Err(error::IterInit {
-                db_name: self.name.clone(),
-                db_path: (*self.path).clone(),
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
                 source: err,
             }),
         }
@@ -228,17 +235,17 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 .transpose_into_fallible()
                 .map(|(key, _)| Ok(key))
                 .map_err({
-                    let db_path = self.path.clone();
+                    let db_path = &*self.path;
                     let name = self.name();
-                    move |err| error::IterItem {
+                    |err| error::IterItem {
                         db_name: name.to_owned(),
-                        db_path: (*db_path).clone(),
+                        db_path: db_path.to_owned(),
                         source: err,
                     }
                 })),
             Err(err) => Err(error::IterInit {
-                db_name: self.name.clone(),
-                db_path: (*self.path).clone(),
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
                 source: err,
             }),
         }
@@ -248,15 +255,17 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         let heed_db = self.heed_db.lazily_decode_data();
         DbWrapper {
             heed_db,
-            name: self.name().to_owned(),
+            name: self.name.clone(),
             path: self.path.clone(),
+            #[cfg(feature = "observe")]
+            watch: self.watch.clone(),
         }
     }
 
     fn len(&self, rotxn: &RoTxn<'_>) -> Result<u64, error::Len> {
         self.heed_db.len(rotxn).map_err(|err| error::Len {
-            db_name: self.name.clone(),
-            db_path: (*self.path).clone(),
+            db_name: (*self.name).to_owned(),
+            db_path: (*self.path).to_owned(),
             source: err,
         })
     }
@@ -276,7 +285,8 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         KC: BytesEncode<'a>,
         DC: BytesEncode<'a>,
     {
-        self.heed_db
+        let () = self
+            .heed_db
             .put_with_flags(rwtxn, flags, key, data)
             .map_err(|err| {
                 let key_bytes = <KC as BytesEncode>::bytes_encode(key)
@@ -284,13 +294,18 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 let value_bytes = <DC as BytesEncode>::bytes_encode(data)
                     .map(|value_bytes| value_bytes.to_vec());
                 error::Put {
-                    db_name: self.name.clone(),
-                    db_path: (*self.path).clone(),
+                    db_name: (*self.name).to_owned(),
+                    db_path: (*self.path).to_owned(),
                     key_bytes,
                     value_bytes,
                     source: err,
                 }
-            })
+            })?;
+        #[cfg(feature = "observe")]
+        let _watch_tx: Option<watch::Sender<_>> = rwtxn
+            .pending_writes
+            .insert(self.name.clone(), self.watch.0.clone());
+        Ok(())
     }
 
     pub fn try_get<'a, 'txn>(
@@ -306,8 +321,8 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
             let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                 .map(|key_bytes| key_bytes.to_vec());
             error::TryGet {
-                db_name: self.name.clone(),
-                db_path: (*self.path).clone(),
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
                 key_bytes,
                 source: err,
             }
@@ -329,8 +344,8 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 .unwrap()
                 .to_vec();
             error::Get::MissingValue {
-                db_name: self.name.clone(),
-                db_path: (*self.path).clone(),
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
                 key_bytes,
             }
         })
@@ -350,19 +365,32 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         KC: BytesEncode<'a>,
         DC: BytesEncode<'a> + BytesDecode<'a>,
     {
-        self.heed_db.get_or_put(rwtxn, key, data).map_err(|err| {
+        let res = self.heed_db.get_or_put(rwtxn, key, data).map_err(|err| {
             let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                 .map(|key_bytes| key_bytes.to_vec());
             let value_bytes = <DC as BytesEncode>::bytes_encode(data)
                 .map(|value_bytes| value_bytes.to_vec());
             error::Put {
-                db_name: self.name.clone(),
-                db_path: (*self.path).clone(),
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
                 key_bytes,
                 value_bytes,
                 source: err,
             }
-        })
+        })?;
+        #[cfg(feature = "observe")]
+        let _watch_tx: Option<watch::Sender<_>> = rwtxn
+            .pending_writes
+            .insert(self.name.clone(), self.watch.0.clone());
+        Ok(res)
+    }
+
+    #[cfg(feature = "observe")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "observe")))]
+    /// Receive notifications when the DB is updated
+    pub fn watch(&self) -> &watch::Receiver<()> {
+        let (_, rx) = &self.watch;
+        rx
     }
 }
 
@@ -476,6 +504,14 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
     {
         self.inner.get(rotxn, key)
     }
+
+    #[cfg(feature = "observe")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "observe")))]
+    /// Receive notifications when the DB is updated
+    #[inline(always)]
+    pub fn watch(&self) -> &watch::Receiver<()> {
+        self.inner.watch()
+    }
 }
 
 impl<KC, DC, C> Database for RoDatabaseUnique<KC, DC, C> {
@@ -498,7 +534,7 @@ impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
     pub fn create(
         env: &Env,
         rwtxn: &mut RwTxn<'_>,
-        name: String,
+        name: &str,
     ) -> Result<Self, env::error::CreateDb>
     where
         KC: 'static,
@@ -628,6 +664,14 @@ impl<KC, DC, C> RoDatabaseDup<KC, DC, C> {
     {
         self.inner.get_duplicates(rotxn, key)
     }
+
+    #[cfg(feature = "observe")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "observe")))]
+    /// Receive notifications when the DB is updated
+    #[inline(always)]
+    pub fn watch(&self) -> &watch::Receiver<()> {
+        self.inner.watch()
+    }
 }
 
 impl<KC, DC, C> Database for RoDatabaseDup<KC, DC, C> {
@@ -650,7 +694,7 @@ impl<KC, DC, C> DatabaseDup<KC, DC, C> {
     pub fn create(
         env: &Env,
         rwtxn: &mut RwTxn<'_>,
-        name: String,
+        name: &str,
     ) -> Result<Self, env::error::CreateDb>
     where
         KC: 'static,
