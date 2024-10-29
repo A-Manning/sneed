@@ -6,12 +6,12 @@ use educe::Educe;
 use fallible_iterator::{FallibleIterator, IteratorExt as _};
 use heed::{
     types::LazyDecode, BytesDecode, BytesEncode, Comparator, DatabaseFlags,
-    DefaultComparator, PutFlags, RoTxn,
+    DefaultComparator, PutFlags,
 };
 #[cfg(feature = "observe")]
 use tokio::sync::watch;
 
-use crate::{env, Env, RwTxn};
+use crate::{env, Env, RwTxn, Txn};
 
 pub mod error;
 
@@ -36,7 +36,8 @@ where
 /// Wrapper for [`heed::Database`] with better errors
 #[derive(Educe)]
 #[educe(Clone, Debug)]
-struct DbWrapper<KC, DC, C = DefaultComparator> {
+struct DbWrapper<'env_id, KC, DC, C = DefaultComparator> {
+    unique_guard: Arc<generativity::Guard<'env_id>>,
     heed_db: heed::Database<KC, DC, C>,
     name: Arc<str>,
     path: Arc<Path>,
@@ -44,11 +45,11 @@ struct DbWrapper<KC, DC, C = DefaultComparator> {
     watch: (watch::Sender<()>, watch::Receiver<()>),
 }
 
-impl<KC, DC, C> DbWrapper<KC, DC, C> {
+impl<'env_id, KC, DC, C> DbWrapper<'env_id, KC, DC, C> {
     /// Create a DB, if it does not already exist, and open it if it does.
     fn create(
-        env: &Env,
-        rwtxn: &mut RwTxn<'_>,
+        env: &Env<'env_id>,
+        rwtxn: &mut RwTxn<'_, 'env_id>,
         name: &str,
         flags: Option<DatabaseFlags>,
     ) -> Result<Self, env::error::CreateDb>
@@ -63,13 +64,15 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
             db_opts.flags(flags);
         }
         let path = env.path().clone();
-        let heed_db =
-            db_opts.create(rwtxn).map_err(|err| env::error::CreateDb {
+        let heed_db = db_opts.create(rwtxn.write_txn()).map_err(|err| {
+            env::error::CreateDb {
                 name: name.to_owned(),
                 path: (*path).to_owned(),
                 source: err,
-            })?;
+            }
+        })?;
         Ok(Self {
+            unique_guard: env.unique_guard().clone(),
             heed_db,
             name: Arc::from(name),
             path,
@@ -80,16 +83,18 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
 
     /// Check if the provided key exists in the db.
     /// The stored value is not decoded, if it exists.
-    fn contains_key<'a, 'txn>(
+    fn contains_key<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<bool, error::TryGet>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        match self.heed_db.lazily_decode_data().get(rotxn, key) {
+        match self.heed_db.lazily_decode_data().get(txn.read_txn(), key) {
             Ok(lazy_value) => Ok(lazy_value.is_some()),
             Err(err) => {
                 let key_bytes = <KC as BytesEncode>::bytes_encode(key)
@@ -104,24 +109,25 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         }
     }
 
-    fn delete<'a>(
+    fn delete<'a, 'env, 'txn>(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &'txn mut RwTxn<'env, 'env_id>,
         key: &'a KC::EItem,
     ) -> Result<bool, error::Delete>
     where
         KC: BytesEncode<'a>,
     {
-        let res = self.heed_db.delete(rwtxn, key).map_err(|err| {
-            let key_bytes = <KC as BytesEncode>::bytes_encode(key)
-                .map(|key_bytes| key_bytes.to_vec());
-            error::Delete {
-                db_name: (*self.name).to_owned(),
-                db_path: (*self.path).to_owned(),
-                key_bytes,
-                source: err,
-            }
-        })?;
+        let res =
+            self.heed_db.delete(rwtxn.write_txn(), key).map_err(|err| {
+                let key_bytes = <KC as BytesEncode>::bytes_encode(key)
+                    .map(|key_bytes| key_bytes.to_vec());
+                error::Delete {
+                    db_name: (*self.name).to_owned(),
+                    db_path: (*self.path).to_owned(),
+                    key_bytes,
+                    source: err,
+                }
+            })?;
         #[cfg(feature = "observe")]
         let _watch_tx: Option<watch::Sender<_>> = rwtxn
             .pending_writes
@@ -130,34 +136,41 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
     }
 
     #[allow(clippy::type_complexity)]
-    fn first<'txn>(
+    fn first<'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::First>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.heed_db.first(rotxn).map_err(|err| error::First {
-            db_name: (*self.name).to_owned(),
-            db_path: (*self.path).to_owned(),
-            source: err,
-        })
+        self.heed_db
+            .first(txn.read_txn())
+            .map_err(|err| error::First {
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
+                source: err,
+            })
     }
 
-    fn get_duplicates<'a, 'txn>(
+    fn get_duplicates<'a, 'env, 'txn, Tx>(
         &'a self,
-        rotxn: &'txn RoTxn<'a>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<
         impl FallibleIterator<Item = DC::DItem, Error = error::IterItem> + 'txn,
         error::IterDuplicatesInit,
     >
     where
+        'a: 'txn,
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn> + BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.get_duplicates(rotxn, key) {
+        match self.heed_db.get_duplicates(txn.read_txn(), key) {
             Ok(it) => Ok(it
                 .into_iter()
                 .flatten()
@@ -187,9 +200,9 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         }
     }
 
-    fn iter<'a, 'txn>(
+    fn iter<'a, 'env, 'txn, Tx>(
         &'a self,
-        rotxn: &'txn RoTxn<'a>,
+        txn: &'txn Tx,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -198,10 +211,13 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         error::IterInit,
     >
     where
+        'a: 'txn,
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.iter(rotxn) {
+        match self.heed_db.iter(txn.read_txn()) {
             Ok(it) => Ok(it.transpose_into_fallible().map_err({
                 let db_path = &*self.path;
                 let name = self.name();
@@ -219,18 +235,21 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         }
     }
 
-    fn iter_keys<'a, 'txn>(
+    fn iter_keys<'a, 'env, 'txn, Tx>(
         &'a self,
-        rotxn: &'txn RoTxn<'a>,
+        txn: &'txn Tx,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
     >
     where
+        'a: 'txn,
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        match self.heed_db.lazily_decode_data().iter(rotxn) {
+        match self.heed_db.lazily_decode_data().iter(txn.read_txn()) {
             Ok(it) => Ok(it
                 .transpose_into_fallible()
                 .map(|(key, _)| Ok(key))
@@ -251,9 +270,10 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         }
     }
 
-    fn lazy_decode(&self) -> DbWrapper<KC, LazyDecode<DC>, C> {
+    fn lazy_decode(&self) -> DbWrapper<'env_id, KC, LazyDecode<DC>, C> {
         let heed_db = self.heed_db.lazily_decode_data();
         DbWrapper {
+            unique_guard: self.unique_guard.clone(),
             heed_db,
             name: self.name.clone(),
             path: self.path.clone(),
@@ -262,8 +282,11 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         }
     }
 
-    fn len(&self, rotxn: &RoTxn<'_>) -> Result<u64, error::Len> {
-        self.heed_db.len(rotxn).map_err(|err| error::Len {
+    fn len<'env, 'txn, Tx>(&self, txn: &'txn Tx) -> Result<u64, error::Len>
+    where
+        Tx: Txn<'env, 'env_id>,
+    {
+        self.heed_db.len(txn.read_txn()).map_err(|err| error::Len {
             db_name: (*self.name).to_owned(),
             db_path: (*self.path).to_owned(),
             source: err,
@@ -274,9 +297,9 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         &self.name
     }
 
-    fn put_with_flags<'a>(
+    fn put_with_flags<'a, 'env, 'txn>(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &'txn mut RwTxn<'env, 'env_id>,
         flags: PutFlags,
         key: &'a KC::EItem,
         data: &'a DC::EItem,
@@ -287,7 +310,7 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
     {
         let () = self
             .heed_db
-            .put_with_flags(rwtxn, flags, key, data)
+            .put_with_flags(rwtxn.write_txn(), flags, key, data)
             .map_err(|err| {
                 let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                     .map(|key_bytes| key_bytes.to_vec());
@@ -308,16 +331,18 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         Ok(())
     }
 
-    pub fn try_get<'a, 'txn>(
+    pub fn try_get<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<Option<DC::DItem>, error::TryGet>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        self.heed_db.get(rotxn, key).map_err(|err| {
+        self.heed_db.get(txn.read_txn(), key).map_err(|err| {
             let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                 .map(|key_bytes| key_bytes.to_vec());
             error::TryGet {
@@ -329,16 +354,18 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         })
     }
 
-    pub fn get<'a, 'txn>(
+    pub fn get<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<DC::DItem, error::Get>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        self.try_get(rotxn, key)?.ok_or_else(|| {
+        self.try_get(txn, key)?.ok_or_else(|| {
             let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                 // Safety: key must encode successfully, as try_get succeeded
                 .unwrap()
@@ -355,9 +382,9 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
     /// or if a value already exists for the key, returns the previous value.
     /// The entry is always written with the NO_OVERWRITE flag.
     /// See [`heed::Database::get_or_put`]
-    pub fn try_put<'a, 'txn>(
+    pub fn try_put<'a, 'env, 'txn>(
         &'txn self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &mut RwTxn<'_, 'env_id>,
         key: &'a KC::EItem,
         data: &'a DC::EItem,
     ) -> Result<Option<DC::DItem>, error::Put>
@@ -365,19 +392,22 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         KC: BytesEncode<'a>,
         DC: BytesEncode<'a> + BytesDecode<'a>,
     {
-        let res = self.heed_db.get_or_put(rwtxn, key, data).map_err(|err| {
-            let key_bytes = <KC as BytesEncode>::bytes_encode(key)
-                .map(|key_bytes| key_bytes.to_vec());
-            let value_bytes = <DC as BytesEncode>::bytes_encode(data)
-                .map(|value_bytes| value_bytes.to_vec());
-            error::Put {
-                db_name: (*self.name).to_owned(),
-                db_path: (*self.path).to_owned(),
-                key_bytes,
-                value_bytes,
-                source: err,
-            }
-        })?;
+        let res = self
+            .heed_db
+            .get_or_put(rwtxn.write_txn(), key, data)
+            .map_err(|err| {
+                let key_bytes = <KC as BytesEncode>::bytes_encode(key)
+                    .map(|key_bytes| key_bytes.to_vec());
+                let value_bytes = <DC as BytesEncode>::bytes_encode(data)
+                    .map(|value_bytes| value_bytes.to_vec());
+                error::Put {
+                    db_name: (*self.name).to_owned(),
+                    db_path: (*self.path).to_owned(),
+                    key_bytes,
+                    value_bytes,
+                    source: err,
+                }
+            })?;
         #[cfg(feature = "observe")]
         let _watch_tx: Option<watch::Sender<_>> = rwtxn
             .pending_writes
@@ -397,43 +427,47 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
 /// Read-only wrapper for [`heed::Database`]
 #[derive(Educe)]
 #[educe(Clone, Debug)]
-pub struct RoDatabaseUnique<KC, DC, C = DefaultComparator> {
-    inner: DbWrapper<KC, DC, C>,
+pub struct RoDatabaseUnique<'env_id, KC, DC, C = DefaultComparator> {
+    inner: DbWrapper<'env_id, KC, DC, C>,
 }
 
-impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
+impl<'env_id, KC, DC, C> RoDatabaseUnique<'env_id, KC, DC, C> {
     /// Check if the provided key exists in the db.
     /// The stored value is not decoded, if it exists.
     #[inline(always)]
-    pub fn contains_key<'a, 'txn>(
+    pub fn contains_key<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<bool, error::TryGet>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        self.inner.contains_key(rotxn, key)
+        self.inner.contains_key(txn, key)
     }
 
     #[allow(clippy::type_complexity)]
     #[inline(always)]
-    pub fn first<'txn>(
+    pub fn first<'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::First>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.first(rotxn)
+        self.inner.first(txn)
     }
 
     #[inline(always)]
-    pub fn iter<'a, 'txn>(
+    pub fn iter<'a, 'env, 'txn, Tx>(
         &'a self,
-        rotxn: &'txn RoTxn<'a>,
+        txn: &'txn Tx,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -442,36 +476,47 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
         error::IterInit,
     >
     where
+        'a: 'txn,
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.iter(rotxn)
+        self.inner.iter(txn)
     }
 
-    pub fn iter_keys<'a, 'txn>(
+    pub fn iter_keys<'a, 'env, 'txn, Tx>(
         &'a self,
-        rotxn: &'txn RoTxn<'a>,
+        txn: &'txn Tx,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
     >
     where
+        'a: 'txn,
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        self.inner.iter_keys(rotxn)
+        self.inner.iter_keys(txn)
     }
 
     #[inline(always)]
-    pub fn lazy_decode(&self) -> RoDatabaseUnique<KC, LazyDecode<DC>, C> {
+    pub fn lazy_decode(
+        &self,
+    ) -> RoDatabaseUnique<'env_id, KC, LazyDecode<DC>, C> {
         RoDatabaseUnique {
             inner: self.inner.lazy_decode(),
         }
     }
 
     #[inline(always)]
-    pub fn len(&self, rotxn: &RoTxn<'_>) -> Result<u64, error::Len> {
-        self.inner.len(rotxn)
+    pub fn len<'env, 'txn, Tx>(&self, txn: &'txn Tx) -> Result<u64, error::Len>
+    where
+        Tx: Txn<'env, 'env_id>,
+    {
+        self.inner.len(txn)
     }
 
     #[inline(always)]
@@ -480,29 +525,33 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
     }
 
     #[inline(always)]
-    pub fn try_get<'a, 'txn>(
+    pub fn try_get<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<Option<DC::DItem>, error::TryGet>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.try_get(rotxn, key)
+        self.inner.try_get(txn, key)
     }
 
     #[inline(always)]
-    pub fn get<'a, 'txn>(
+    pub fn get<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<DC::DItem, error::Get>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.get(rotxn, key)
+        self.inner.get(txn, key)
     }
 
     #[cfg(feature = "observe")]
@@ -514,7 +563,7 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
     }
 }
 
-impl<KC, DC, C> Database for RoDatabaseUnique<KC, DC, C> {
+impl<KC, DC, C> Database for RoDatabaseUnique<'_, KC, DC, C> {
     type KC = KC;
     type DC = DC;
     fn name(&self) -> &str {
@@ -526,14 +575,14 @@ impl<KC, DC, C> Database for RoDatabaseUnique<KC, DC, C> {
 #[derive(Educe)]
 #[educe(Clone, Debug)]
 #[repr(transparent)]
-pub struct DatabaseUnique<KC, DC, C = DefaultComparator> {
-    inner: RoDatabaseUnique<KC, DC, C>,
+pub struct DatabaseUnique<'env_id, KC, DC, C = DefaultComparator> {
+    inner: RoDatabaseUnique<'env_id, KC, DC, C>,
 }
 
-impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
+impl<'env_id, KC, DC, C> DatabaseUnique<'env_id, KC, DC, C> {
     pub fn create(
-        env: &Env,
-        rwtxn: &mut RwTxn<'_>,
+        env: &Env<'env_id>,
+        rwtxn: &mut RwTxn<'_, 'env_id>,
         name: &str,
     ) -> Result<Self, env::error::CreateDb>
     where
@@ -548,9 +597,9 @@ impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
     }
 
     #[inline(always)]
-    pub fn delete<'a>(
+    pub fn delete<'a, 'env>(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &mut RwTxn<'env, 'env_id>,
         key: &'a KC::EItem,
     ) -> Result<bool, error::Delete>
     where
@@ -560,16 +609,18 @@ impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
     }
 
     #[inline(always)]
-    pub fn lazy_decode(&self) -> DatabaseUnique<KC, LazyDecode<DC>, C> {
+    pub fn lazy_decode(
+        &self,
+    ) -> DatabaseUnique<'env_id, KC, LazyDecode<DC>, C> {
         DatabaseUnique {
             inner: self.inner.lazy_decode(),
         }
     }
 
     #[inline(always)]
-    pub fn put<'a>(
+    pub fn put<'a, 'env>(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &mut RwTxn<'env, 'env_id>,
         key: &'a KC::EItem,
         data: &'a DC::EItem,
     ) -> Result<(), error::Put>
@@ -587,9 +638,9 @@ impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
     /// The entry is always written with the NO_OVERWRITE flag.
     /// See [`heed::Database::get_or_put`]
     #[inline(always)]
-    pub fn try_put<'a, 'txn>(
+    pub fn try_put<'a, 'env, 'txn>(
         &'txn self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &mut RwTxn<'env, 'env_id>,
         key: &'a KC::EItem,
         data: &'a DC::EItem,
     ) -> Result<Option<DC::DItem>, error::Put>
@@ -601,8 +652,10 @@ impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
     }
 }
 
-impl<KC, DC, C> std::ops::Deref for DatabaseUnique<KC, DC, C> {
-    type Target = RoDatabaseUnique<KC, DC, C>;
+impl<'env_id, KC, DC, C> std::ops::Deref
+    for DatabaseUnique<'env_id, KC, DC, C>
+{
+    type Target = RoDatabaseUnique<'env_id, KC, DC, C>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -612,36 +665,41 @@ impl<KC, DC, C> std::ops::Deref for DatabaseUnique<KC, DC, C> {
 /// Read-only wrapper for [`heed::Database`] with duplicate keys
 #[derive(Educe)]
 #[educe(Clone, Debug)]
-pub struct RoDatabaseDup<KC, DC, C = DefaultComparator> {
-    inner: DbWrapper<KC, DC, C>,
+pub struct RoDatabaseDup<'id, KC, DC, C = DefaultComparator> {
+    inner: DbWrapper<'id, KC, DC, C>,
 }
 
-impl<KC, DC, C> RoDatabaseDup<KC, DC, C> {
+impl<'env_id, KC, DC, C> RoDatabaseDup<'env_id, KC, DC, C> {
     /// Check if the provided key exists in the db.
     /// The stored value is not decoded, if it exists.
     #[inline(always)]
-    pub fn contains_key<'a, 'txn>(
+    pub fn contains_key<'a, 'env, 'txn, Tx>(
         &self,
-        rotxn: &'txn RoTxn<'_>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<bool, error::TryGet>
     where
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesEncode<'a>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        self.inner.contains_key(rotxn, key)
+        self.inner.contains_key(txn, key)
     }
 
     #[inline(always)]
-    pub fn lazy_decode(&self) -> RoDatabaseDup<KC, LazyDecode<DC>, C> {
+    pub fn lazy_decode(&self) -> RoDatabaseDup<'env_id, KC, LazyDecode<DC>, C> {
         RoDatabaseDup {
             inner: self.inner.lazy_decode(),
         }
     }
 
     #[inline(always)]
-    pub fn len(&self, rotxn: &RoTxn<'_>) -> Result<u64, error::Len> {
-        self.inner.len(rotxn)
+    pub fn len<'env, 'txn, Tx>(&self, txn: &'txn Tx) -> Result<u64, error::Len>
+    where
+        Tx: Txn<'env, 'env_id>,
+    {
+        self.inner.len(txn)
     }
 
     #[inline(always)]
@@ -650,19 +708,22 @@ impl<KC, DC, C> RoDatabaseDup<KC, DC, C> {
     }
 
     #[inline(always)]
-    pub fn get<'a, 'txn>(
+    pub fn get<'a, 'env, 'txn, Tx>(
         &'a self,
-        rotxn: &'txn RoTxn<'a>,
+        txn: &'txn Tx,
         key: &'a KC::EItem,
     ) -> Result<
         impl FallibleIterator<Item = DC::DItem, Error = error::IterItem> + 'txn,
         error::IterDuplicatesInit,
     >
     where
+        'a: 'txn,
+        'env: 'txn,
+        Tx: Txn<'env, 'env_id>,
         KC: BytesDecode<'txn> + BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.get_duplicates(rotxn, key)
+        self.inner.get_duplicates(txn, key)
     }
 
     #[cfg(feature = "observe")]
@@ -674,7 +735,7 @@ impl<KC, DC, C> RoDatabaseDup<KC, DC, C> {
     }
 }
 
-impl<KC, DC, C> Database for RoDatabaseDup<KC, DC, C> {
+impl<KC, DC, C> Database for RoDatabaseDup<'_, KC, DC, C> {
     type KC = KC;
     type DC = DC;
     fn name(&self) -> &str {
@@ -686,14 +747,14 @@ impl<KC, DC, C> Database for RoDatabaseDup<KC, DC, C> {
 #[derive(Educe)]
 #[educe(Clone, Debug)]
 #[repr(transparent)]
-pub struct DatabaseDup<KC, DC, C = DefaultComparator> {
-    inner: RoDatabaseDup<KC, DC, C>,
+pub struct DatabaseDup<'env_id, KC, DC, C = DefaultComparator> {
+    inner: RoDatabaseDup<'env_id, KC, DC, C>,
 }
 
-impl<KC, DC, C> DatabaseDup<KC, DC, C> {
+impl<'env_id, KC, DC, C> DatabaseDup<'env_id, KC, DC, C> {
     pub fn create(
-        env: &Env,
-        rwtxn: &mut RwTxn<'_>,
+        env: &Env<'env_id>,
+        rwtxn: &mut RwTxn<'_, 'env_id>,
         name: &str,
     ) -> Result<Self, env::error::CreateDb>
     where
@@ -710,9 +771,9 @@ impl<KC, DC, C> DatabaseDup<KC, DC, C> {
 
     /// Delete each item with the specified key
     #[inline(always)]
-    pub fn delete_each<'a>(
+    pub fn delete_each<'a, 'env, 'txn>(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &'txn mut RwTxn<'env, 'env_id>,
         key: &'a KC::EItem,
     ) -> Result<bool, error::Delete>
     where
@@ -722,16 +783,16 @@ impl<KC, DC, C> DatabaseDup<KC, DC, C> {
     }
 
     #[inline(always)]
-    pub fn lazy_decode(&self) -> DatabaseDup<KC, LazyDecode<DC>, C> {
+    pub fn lazy_decode(&self) -> DatabaseDup<'env_id, KC, LazyDecode<DC>, C> {
         DatabaseDup {
             inner: self.inner.lazy_decode(),
         }
     }
 
     #[inline(always)]
-    pub fn put<'a>(
+    pub fn put<'a, 'env, 'txn>(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rwtxn: &'txn mut RwTxn<'env, 'env_id>,
         key: &'a KC::EItem,
         data: &'a DC::EItem,
     ) -> Result<(), error::Put>
@@ -745,8 +806,8 @@ impl<KC, DC, C> DatabaseDup<KC, DC, C> {
     }
 }
 
-impl<KC, DC, C> std::ops::Deref for DatabaseDup<KC, DC, C> {
-    type Target = RoDatabaseDup<KC, DC, C>;
+impl<'env_id, KC, DC, C> std::ops::Deref for DatabaseDup<'env_id, KC, DC, C> {
+    type Target = RoDatabaseDup<'env_id, KC, DC, C>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
