@@ -20,7 +20,6 @@ educe = { version = "0.6.0", default-features = false, features = ["Clone", "Deb
 # Needed due to transitive dependency via educe
 enum-ordinalize = { version = "4.2.1", default-features = false }
 fallible-iterator = "0.3"
-generativity = "1.1.0"
 heed = { version = "0.20.3", default-features = false }
 hex = "0.3"
 strum = { version = "0.20", features = ["derive"]}
