@@ -1,6 +1,6 @@
 [package]
 name = "sneed"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["Ash Manning <10554686+A-Manning@users.noreply.github.com>"]
 edition = "2021"
 rust-version = "1.74.1"
