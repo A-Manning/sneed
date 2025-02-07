@@ -1,6 +1,6 @@
 [package]
 name = "sneed"
-version = "0.0.3"
+version = "0.0.4"
 authors = ["Ash Manning <10554686+A-Manning@users.noreply.github.com>"]
 edition = "2021"
 rust-version = "1.74.1"
@@ -20,7 +20,7 @@ educe = { version = "0.6.0", default-features = false, features = ["Clone", "Deb
 # Needed due to transitive dependency via educe
 enum-ordinalize = { version = "4.2.1", default-features = false }
 fallible-iterator = "0.3"
-heed = { version = "0.20.3", default-features = false }
+heed = { version = "0.21.0", default-features = false }
 hex = "0.3"
 strum = { version = "0.20", features = ["derive"]}
 # Needed due to transitive dependency via heed
