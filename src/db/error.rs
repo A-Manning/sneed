@@ -248,6 +248,7 @@ pub mod inconsistent {
         }
     }
 
+    /// Data exists in both DBs
     #[derive(Debug, Error)]
     #[error(
         "Inconsistent dbs: `{}` exists in both db `{}` (as {}) and in db `{}` (as {})",
@@ -277,6 +278,7 @@ pub mod inconsistent {
         }
     }
 
+    /// Data does not exist in either DB
     #[derive(Debug, Error)]
     #[error(
         "Inconsistent dbs: `{}` does not exist in db `{}` (as {}) or in db `{}` (as {})",
@@ -306,6 +308,7 @@ pub mod inconsistent {
         }
     }
 
+    /// Data exists in the first DB, but not in the other
     #[derive(Debug, Error)]
     #[error(
         "Inconsistent dbs: `{}` exists in db `{}` (as {}), but not in db `{}` (as {})",
