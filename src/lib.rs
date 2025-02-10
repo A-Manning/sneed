@@ -151,6 +151,14 @@ pub mod env {
         }
 
         #[derive(Debug, Error)]
+        #[error("Error opening database `{name}` in `{path}`")]
+        pub struct OpenDb {
+            pub(crate) name: String,
+            pub(crate) path: PathBuf,
+            pub(crate) source: heed::Error,
+        }
+
+        #[derive(Debug, Error)]
         #[error("Error opening database env at (`{path}`)")]
         pub struct OpenEnv {
             pub(crate) path: PathBuf,
@@ -176,6 +184,8 @@ pub mod env {
         pub enum Error {
             #[error(transparent)]
             CreateDb(#[from] CreateDb),
+            #[error(transparent)]
+            OpenDb(#[from] OpenDb),
             #[error(transparent)]
             OpenEnv(#[from] OpenEnv),
             #[error(transparent)]

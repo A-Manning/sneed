@@ -304,6 +304,42 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         &self.name
     }
 
+    /// Open a DB that already exists.
+    fn open(
+        env: &Env,
+        rotxn: &RoTxn<'_>,
+        name: &str,
+        flags: Option<DatabaseFlags>,
+    ) -> Result<Option<Self>, env::error::OpenDb>
+    where
+        KC: 'static,
+        DC: 'static,
+        C: Comparator + 'static,
+    {
+        let mut db_opts =
+            env.database_options().name(name).types().key_comparator();
+        if let Some(flags) = flags {
+            db_opts.flags(flags);
+        }
+        let path = env.path().clone();
+        let Some(heed_db) =
+            db_opts.open(rotxn).map_err(|err| env::error::OpenDb {
+                name: name.to_owned(),
+                path: (*path).to_owned(),
+                source: err,
+            })?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            heed_db,
+            name: Arc::from(name),
+            path,
+            #[cfg(feature = "observe")]
+            watch: watch::channel(()),
+        }))
+    }
+
     fn put_with_flags<'a>(
         &self,
         rwtxn: &mut RwTxn<'_>,
@@ -614,6 +650,24 @@ impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
         }
     }
 
+    pub fn open(
+        env: &Env,
+        rotxn: &RoTxn<'_>,
+        name: &str,
+    ) -> Result<Option<Self>, env::error::OpenDb>
+    where
+        KC: 'static,
+        DC: 'static,
+        C: Comparator + 'static,
+    {
+        let Some(db_wrapper) = DbWrapper::open(env, rotxn, name, None)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            inner: RoDatabaseUnique { inner: db_wrapper },
+        }))
+    }
+
     #[inline(always)]
     pub fn put<'a>(
         &self,
@@ -774,6 +828,26 @@ impl<KC, DC, C> DatabaseDup<KC, DC, C> {
         DatabaseDup {
             inner: self.inner.lazy_decode(),
         }
+    }
+
+    pub fn open(
+        env: &Env,
+        rotxn: &RoTxn<'_>,
+        name: &str,
+    ) -> Result<Option<Self>, env::error::OpenDb>
+    where
+        KC: 'static,
+        DC: 'static,
+        C: Comparator + 'static,
+    {
+        let flags = DatabaseFlags::DUP_SORT;
+        let Some(db_wrapper) = DbWrapper::open(env, rotxn, name, Some(flags))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            inner: RoDatabaseDup { inner: db_wrapper },
+        }))
     }
 
     #[inline(always)]
