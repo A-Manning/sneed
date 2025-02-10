@@ -374,6 +374,38 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
         Ok(())
     }
 
+    fn rev_iter<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        match self.heed_db.rev_iter(rotxn) {
+            Ok(it) => Ok(it.transpose_into_fallible().map_err({
+                let db_path = &*self.path;
+                let name = self.name();
+                |err| error::IterItem {
+                    db_name: name.to_owned(),
+                    db_path: db_path.to_owned(),
+                    source: err,
+                }
+            })),
+            Err(err) => Err(error::IterInit {
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
+                source: err,
+            }),
+        }
+    }
+
     pub fn try_get<'a, 'txn>(
         &self,
         rotxn: &'txn RoTxn<'_>,
@@ -556,6 +588,24 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
     #[inline(always)]
     pub fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    #[inline(always)]
+    pub fn rev_iter<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.rev_iter(rotxn)
     }
 
     #[inline(always)]
