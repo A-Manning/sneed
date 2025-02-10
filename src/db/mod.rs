@@ -496,7 +496,7 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
     #[inline(always)]
     pub fn last<'txn>(
         &self,
-        rotxn: &'txn mut RoTxn<'_>,
+        rotxn: &'txn RoTxn<'_>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
     where
         KC: BytesDecode<'txn>,
