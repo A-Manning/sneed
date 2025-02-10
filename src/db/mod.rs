@@ -45,6 +45,20 @@ struct DbWrapper<KC, DC, C = DefaultComparator> {
 }
 
 impl<KC, DC, C> DbWrapper<KC, DC, C> {
+    /// Deletes all key/value pairs in this database.
+    fn clear(&self, rwtxn: &mut RwTxn<'_>) -> Result<(), error::Clear> {
+        let () = self.heed_db.clear(rwtxn).map_err(|err| error::Clear {
+            db_name: (*self.name).to_owned(),
+            db_path: (*self.path).to_owned(),
+            source: err,
+        })?;
+        #[cfg(feature = "observe")]
+        let _watch_tx: Option<watch::Sender<_>> = rwtxn
+            .pending_writes
+            .insert(self.name.clone(), self.watch.0.clone());
+        Ok(())
+    }
+
     /// Create a DB, if it does not already exist, and open it if it does.
     fn create(
         env: &Env,
@@ -249,6 +263,22 @@ impl<KC, DC, C> DbWrapper<KC, DC, C> {
                 source: err,
             }),
         }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn last<'txn>(
+        &self,
+        rotxn: &'txn RoTxn<'_>,
+    ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.heed_db.last(rotxn).map_err(|err| error::Last {
+            db_name: (*self.name).to_owned(),
+            db_path: (*self.path).to_owned(),
+            source: err,
+        })
     }
 
     fn lazy_decode(&self) -> DbWrapper<KC, LazyDecode<DC>, C> {
@@ -462,6 +492,19 @@ impl<KC, DC, C> RoDatabaseUnique<KC, DC, C> {
         self.inner.iter_keys(rotxn)
     }
 
+    #[allow(clippy::type_complexity)]
+    #[inline(always)]
+    pub fn last<'txn>(
+        &self,
+        rotxn: &'txn mut RoTxn<'_>,
+    ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.last(rotxn)
+    }
+
     #[inline(always)]
     pub fn lazy_decode(&self) -> RoDatabaseUnique<KC, LazyDecode<DC>, C> {
         RoDatabaseUnique {
@@ -531,6 +574,11 @@ pub struct DatabaseUnique<KC, DC, C = DefaultComparator> {
 }
 
 impl<KC, DC, C> DatabaseUnique<KC, DC, C> {
+    #[inline(always)]
+    pub fn clear(&self, rwtxn: &mut RwTxn<'_>) -> Result<(), error::Clear> {
+        self.inner.inner.clear(rwtxn)
+    }
+
     pub fn create(
         env: &Env,
         rwtxn: &mut RwTxn<'_>,

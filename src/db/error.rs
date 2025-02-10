@@ -16,6 +16,14 @@ fn display_key_bytes(key_bytes: &Result<Vec<u8>, heed::BoxedError>) -> String {
 }
 
 #[derive(Debug, Error)]
+#[error("Failed to clear db `{db_name}` at `{db_path}`")]
+pub struct Clear {
+    pub(crate) db_name: String,
+    pub(crate) db_path: PathBuf,
+    pub(crate) source: heed::Error,
+}
+
+#[derive(Debug, Error)]
 #[error(
     "Failed to delete from db `{db_name}` at `{db_path}` ({})",
     display_key_bytes(.key_bytes)
@@ -83,6 +91,14 @@ pub enum Iter {
     Init(#[from] IterInit),
     #[error(transparent)]
     Item(#[from] IterItem),
+}
+
+#[derive(Debug, Error)]
+#[error("Failed to fetch last item for db `{db_name}` at `{db_path}`")]
+pub struct Last {
+    pub(crate) db_name: String,
+    pub(crate) db_path: PathBuf,
+    pub(crate) source: heed::Error,
 }
 
 #[derive(Debug, Error)]
@@ -355,6 +371,8 @@ pub use inconsistent::Error as Inconsistent;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
+    Clear(#[from] Clear),
+    #[error(transparent)]
     Delete(#[from] Delete),
     #[error(transparent)]
     First(#[from] First),
@@ -372,6 +390,8 @@ pub enum Error {
     IterInit(#[from] IterInit),
     #[error(transparent)]
     IterItem(#[from] IterItem),
+    #[error(transparent)]
+    Last(#[from] Last),
     #[error(transparent)]
     Len(#[from] Len),
     #[error(transparent)]
