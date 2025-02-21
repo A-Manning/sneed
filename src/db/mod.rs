@@ -14,6 +14,7 @@ use tokio::sync::watch;
 use crate::{env, Env, RwTxn};
 
 pub mod error;
+pub use error::Error;
 
 pub trait Database {
     type KC;

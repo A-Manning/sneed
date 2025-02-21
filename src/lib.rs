@@ -4,8 +4,6 @@
 
 use heed::{BytesDecode, BytesEncode};
 use thiserror::Error;
-//#[cfg(feature = "serde")]
-//use serde::{Deserialize, Serialize};
 
 const UNIT_KEY_ENCODED: u8 = 0x69;
 
@@ -262,4 +260,17 @@ pub mod env {
 pub use env::{Env, Error as EnvError};
 
 pub mod db;
-pub use db::{DatabaseDup, DatabaseUnique, RoDatabaseDup, RoDatabaseUnique};
+pub use db::{
+    DatabaseDup, DatabaseUnique, Error as DbError, RoDatabaseDup,
+    RoDatabaseUnique,
+};
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("Database error")]
+    Db(#[from] DbError),
+    #[error("Database env error")]
+    Env(#[from] EnvError),
+    #[error("Database write error")]
+    Write(#[from] RwTxnError),
+}
