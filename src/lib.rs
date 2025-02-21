@@ -56,10 +56,32 @@ impl BytesEncode<'_> for UnitKey {
     }
 }
 
+pub mod rotxn {
+    /// Wrapper for heed's `RoTxn`.
+    ///
+    /// The type tag can be used to distinguish between different database
+    /// envs. Databases and txns opened within an `Env` will also be tagged,
+    /// ensuring that txns created in an `Env` can only be used for DBs
+    /// created/opened by the same `Env`.
+    #[repr(transparent)]
+    pub struct RoTxn<'a, Tag = ()> {
+        pub(crate) inner: heed::RoTxn<'a>,
+        pub(crate) _tag: std::marker::PhantomData<Tag>,
+    }
+
+    impl<'rwtxn, Tag> std::ops::Deref for RoTxn<'rwtxn, Tag> {
+        type Target = heed::RoTxn<'rwtxn>;
+        fn deref(&self) -> &Self::Target {
+            &self.inner
+        }
+    }
+}
+pub use rotxn::RoTxn;
+
 pub mod rwtxn {
+    use std::path::Path;
     #[cfg(feature = "observe")]
     use std::{collections::HashMap, sync::Arc};
-    use std::{ops::DerefMut as _, path::Path};
 
     #[cfg(feature = "observe")]
     use tokio::sync::watch;
@@ -85,15 +107,21 @@ pub mod rwtxn {
     }
     pub use error::Error;
 
-    /// Wrapper for heed's `RwTxn`
-    pub struct RwTxn<'a> {
+    /// Wrapper for heed's `RwTxn`.
+    ///
+    /// The type tag can be used to distinguish between different database
+    /// envs. Databases and txns opened within an `Env` will also be tagged,
+    /// ensuring that txns created in an `Env` can only be used for DBs
+    /// created/opened by the same `Env`.
+    pub struct RwTxn<'a, Tag = ()> {
         pub(crate) inner: heed::RwTxn<'a>,
         pub(crate) db_dir: &'a Path,
+        pub(crate) _tag: std::marker::PhantomData<Tag>,
         #[cfg(feature = "observe")]
         pub(crate) pending_writes: HashMap<Arc<str>, watch::Sender<()>>,
     }
 
-    impl RwTxn<'_> {
+    impl<Tag> RwTxn<'_, Tag> {
         pub fn commit(self) -> Result<(), error::Commit> {
             let () = self.inner.commit().map_err(|err| error::Commit {
                 db_dir: self.db_dir.to_owned(),
@@ -107,22 +135,18 @@ pub mod rwtxn {
         }
     }
 
-    impl<'rwtxn> std::ops::Deref for RwTxn<'rwtxn> {
-        type Target = heed::RwTxn<'rwtxn>;
+    impl<'rwtxn, Tag> std::ops::Deref for RwTxn<'rwtxn, Tag> {
+        type Target = crate::RoTxn<'rwtxn, Tag>;
         fn deref(&self) -> &Self::Target {
-            &self.inner
+            let inner: &heed::RoTxn<'rwtxn> = &self.inner;
+            // This is safe because RoTxn is just a wrapper around heed::RoTxn
+            unsafe { std::mem::transmute(inner) }
         }
     }
 
-    impl std::ops::DerefMut for RwTxn<'_> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.inner
-        }
-    }
-
-    impl<'rwtxn> AsMut<heed::RwTxn<'rwtxn>> for RwTxn<'rwtxn> {
+    impl<'rwtxn, Tag> AsMut<heed::RwTxn<'rwtxn>> for RwTxn<'rwtxn, Tag> {
         fn as_mut(&mut self) -> &mut heed::RwTxn<'rwtxn> {
-            self.deref_mut()
+            &mut self.inner
         }
     }
 }
@@ -131,9 +155,9 @@ pub use rwtxn::{Error as RwTxnError, RwTxn};
 pub mod env {
     use std::{path::Path, sync::Arc};
 
-    use heed::{DatabaseOpenOptions, EnvOpenOptions, RoTxn};
+    use heed::{DatabaseOpenOptions, EnvOpenOptions};
 
-    use crate::RwTxn;
+    use crate::{RoTxn, RwTxn};
 
     pub mod error {
         use std::path::PathBuf;
@@ -194,14 +218,21 @@ pub mod env {
     }
     pub use error::Error;
 
-    /// Wrapper for heed's `Env`
-    #[derive(Clone, Debug)]
-    pub struct Env {
+    /// Wrapper for heed's `Env`.
+    ///
+    /// The type tag can be used to distinguish between different database
+    /// envs. Databases and txns opened within an `Env` will also be tagged,
+    /// ensuring that txns created in an `Env` can only be used for DBs
+    /// created/opened by the same `Env`.
+    #[derive(educe::Educe)]
+    #[educe(Clone(bound()), Debug(bound()))]
+    pub struct Env<Tag = ()> {
         inner: heed::Env,
         path: Arc<Path>,
+        pub(crate) tag: std::marker::PhantomData<Tag>,
     }
 
-    impl Env {
+    impl<Tag> Env<Tag> {
         /// # Safety
         /// See [`heed::EnvOpenOptions::open`]
         pub unsafe fn open(
@@ -220,6 +251,7 @@ pub mod env {
             Ok(Self {
                 inner,
                 path: Arc::from(path),
+                tag: std::marker::PhantomData,
             })
         }
 
@@ -235,14 +267,19 @@ pub mod env {
             self.inner.database_options()
         }
 
-        pub fn read_txn(&self) -> Result<RoTxn<'_>, error::ReadTxn> {
-            self.inner.read_txn().map_err(|err| error::ReadTxn {
-                db_dir: (*self.path).to_owned(),
-                source: err,
+        pub fn read_txn(&self) -> Result<RoTxn<'_, Tag>, error::ReadTxn> {
+            let inner =
+                self.inner.read_txn().map_err(|err| error::ReadTxn {
+                    db_dir: (*self.path).to_owned(),
+                    source: err,
+                })?;
+            Ok(RoTxn {
+                inner,
+                _tag: self.tag,
             })
         }
 
-        pub fn write_txn(&self) -> Result<RwTxn<'_>, error::WriteTxn> {
+        pub fn write_txn(&self) -> Result<RwTxn<'_, Tag>, error::WriteTxn> {
             let inner =
                 self.inner.write_txn().map_err(|err| error::WriteTxn {
                     db_dir: (*self.path).to_owned(),
@@ -251,6 +288,7 @@ pub mod env {
             Ok(RwTxn {
                 inner,
                 db_dir: &self.path,
+                _tag: self.tag,
                 #[cfg(feature = "observe")]
                 pending_writes: Default::default(),
             })
