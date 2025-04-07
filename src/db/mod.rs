@@ -818,6 +818,32 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
         self.inner.contains_key(rotxn, key)
     }
 
+    #[allow(clippy::type_complexity)]
+    #[inline(always)]
+    pub fn first<'txn>(
+        &self,
+        rotxn: &'txn RoTxn<'_, Tag>,
+    ) -> Result<Option<(KC::DItem, DC::DItem)>, error::First>
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.first(rotxn)
+    }
+
+    #[allow(clippy::type_complexity)]
+    #[inline(always)]
+    pub fn last<'txn>(
+        &self,
+        rotxn: &'txn RoTxn<'_, Tag>,
+    ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.last(rotxn)
+    }
+
     #[inline(always)]
     pub fn lazy_decode(&self) -> RoDatabaseDup<KC, LazyDecode<DC>, Tag, C> {
         RoDatabaseDup {
