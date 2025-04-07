@@ -155,6 +155,36 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         Ok(res)
     }
 
+    fn delete_one_duplicate<'a>(
+        &self,
+        rwtxn: &mut RwTxn<'_, Tag>,
+        key: &'a KC::EItem,
+        data: &'a DC::EItem,
+    ) -> Result<bool, error::Delete>
+    where
+        KC: BytesEncode<'a>,
+        DC: BytesEncode<'a>,
+    {
+        let res = self
+            .heed_db
+            .delete_one_duplicate(rwtxn.as_mut(), key, data)
+            .map_err(|err| {
+                let key_bytes = <KC as BytesEncode>::bytes_encode(key)
+                    .map(|key_bytes| key_bytes.to_vec());
+                error::Delete {
+                    db_name: (*self.name).to_owned(),
+                    db_path: (*self.path).to_owned(),
+                    key_bytes,
+                    source: err,
+                }
+            })?;
+        #[cfg(feature = "observe")]
+        let _watch_tx: Option<watch::Sender<_>> = rwtxn
+            .pending_writes
+            .insert(self.name.clone(), self.watch.0.clone());
+        Ok(res)
+    }
+
     #[allow(clippy::type_complexity)]
     fn first<'txn>(
         &self,
@@ -923,6 +953,21 @@ impl<KC, DC, Tag, C> DatabaseDup<KC, DC, Tag, C> {
         Ok(Self {
             inner: RoDatabaseDup { inner: db_wrapper },
         })
+    }
+
+    /// Delete a single key-value pair.
+    #[inline(always)]
+    pub fn delete_one<'a>(
+        &self,
+        rwtxn: &mut RwTxn<'_, Tag>,
+        key: &'a KC::EItem,
+        data: &'a DC::EItem,
+    ) -> Result<bool, error::Delete>
+    where
+        KC: BytesEncode<'a>,
+        DC: BytesEncode<'a>,
+    {
+        self.inner.inner.delete_one_duplicate(rwtxn, key, data)
     }
 
     /// Delete each item with the specified key
