@@ -57,6 +57,24 @@ impl BytesEncode<'_> for UnitKey {
 }
 
 pub mod rotxn {
+    pub mod error {
+        use thiserror::Error;
+
+        #[derive(Debug, Error)]
+        #[error("Error commiting read txn")]
+        pub struct Commit {
+            pub(crate) source: heed::Error,
+        }
+
+        /// General error type for RoTxn operations
+        #[derive(Debug, Error)]
+        pub enum Error {
+            #[error(transparent)]
+            Commit(#[from] Commit),
+        }
+    }
+    pub use error::Error;
+
     /// Wrapper for heed's `RoTxn`.
     ///
     /// The type tag can be used to distinguish between different database
@@ -69,6 +87,14 @@ pub mod rotxn {
         pub(crate) _tag: std::marker::PhantomData<Tag>,
     }
 
+    impl<Tag> RoTxn<'_, Tag> {
+        pub fn commit(self) -> Result<(), error::Commit> {
+            self.inner
+                .commit()
+                .map_err(|err| error::Commit { source: err })
+        }
+    }
+
     impl<'rwtxn, Tag> std::ops::Deref for RoTxn<'rwtxn, Tag> {
         type Target = heed::RoTxn<'rwtxn>;
         fn deref(&self) -> &Self::Target {
@@ -76,7 +102,7 @@ pub mod rotxn {
         }
     }
 }
-pub use rotxn::RoTxn;
+pub use rotxn::{Error as RoTxnError, RoTxn};
 
 pub mod rwtxn {
     use std::path::Path;
@@ -309,6 +335,8 @@ pub enum Error {
     Db(#[from] DbError),
     #[error("Database env error")]
     Env(#[from] EnvError),
+    #[error("Database read error")]
+    Read(#[from] RoTxnError),
     #[error("Database write error")]
     Write(#[from] RwTxnError),
 }
