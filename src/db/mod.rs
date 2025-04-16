@@ -243,7 +243,8 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         }
     }
 
-    fn iter<'a, 'txn>(
+    /// Iterate through duplicate values
+    fn iter_through_duplicate_values<'a, 'txn>(
         &'a self,
         rotxn: &'txn RoTxn<'a, Tag>,
     ) -> Result<
@@ -258,15 +259,18 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         DC: BytesDecode<'txn>,
     {
         match self.heed_db.iter(rotxn) {
-            Ok(it) => Ok(it.transpose_into_fallible().map_err({
-                let db_path = &*self.path;
-                let name = self.name();
-                |err| error::IterItem {
-                    db_name: name.to_owned(),
-                    db_path: db_path.to_owned(),
-                    source: err,
-                }
-            })),
+            Ok(it) => Ok(it
+                .move_through_duplicate_values()
+                .transpose_into_fallible()
+                .map_err({
+                    let db_path = &*self.path;
+                    let name = self.name();
+                    |err| error::IterItem {
+                        db_name: name.to_owned(),
+                        db_path: db_path.to_owned(),
+                        source: err,
+                    }
+                })),
             Err(err) => Err(error::IterInit {
                 db_name: (*self.name).to_owned(),
                 db_path: (*self.path).to_owned(),
@@ -275,7 +279,43 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         }
     }
 
-    fn iter_keys<'a, 'txn>(
+    /// Iterate through keys, skipping duplicate values
+    fn iter_through_keys<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        match self.heed_db.iter(rotxn) {
+            Ok(it) => {
+                Ok(it.move_between_keys().transpose_into_fallible().map_err({
+                    let db_path = &*self.path;
+                    let name = self.name();
+                    |err| error::IterItem {
+                        db_name: name.to_owned(),
+                        db_path: db_path.to_owned(),
+                        source: err,
+                    }
+                }))
+            }
+            Err(err) => Err(error::IterInit {
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
+                source: err,
+            }),
+        }
+    }
+
+    /// Iterate over keys, moving through duplicate values
+    fn iter_keys_duplicate<'a, 'txn>(
         &'a self,
         rotxn: &'txn RoTxn<'a, Tag>,
     ) -> Result<
@@ -288,6 +328,41 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     {
         match self.heed_db.lazily_decode_data().iter(rotxn) {
             Ok(it) => Ok(it
+                .move_through_duplicate_values()
+                .transpose_into_fallible()
+                .map(|(key, _)| Ok(key))
+                .map_err({
+                    let db_path = &*self.path;
+                    let name = self.name();
+                    |err| error::IterItem {
+                        db_name: name.to_owned(),
+                        db_path: db_path.to_owned(),
+                        source: err,
+                    }
+                })),
+            Err(err) => Err(error::IterInit {
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
+                source: err,
+            }),
+        }
+    }
+
+    /// Iterate over unique keys, ignoring duplicate values
+    fn iter_keys_unique<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        LazyDecode<DC>: BytesDecode<'txn>,
+    {
+        match self.heed_db.lazily_decode_data().iter(rotxn) {
+            Ok(it) => Ok(it
+                .move_between_keys()
                 .transpose_into_fallible()
                 .map(|(key, _)| Ok(key))
                 .map_err({
@@ -418,7 +493,8 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         Ok(())
     }
 
-    fn rev_iter<'a, 'txn>(
+    /// Iterate through duplicate values
+    fn rev_iter_through_duplicate_values<'a, 'txn>(
         &'a self,
         rotxn: &'txn RoTxn<'a, Tag>,
     ) -> Result<
@@ -433,15 +509,53 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         DC: BytesDecode<'txn>,
     {
         match self.heed_db.rev_iter(rotxn) {
-            Ok(it) => Ok(it.transpose_into_fallible().map_err({
-                let db_path = &*self.path;
-                let name = self.name();
-                |err| error::IterItem {
-                    db_name: name.to_owned(),
-                    db_path: db_path.to_owned(),
-                    source: err,
-                }
-            })),
+            Ok(it) => Ok(it
+                .move_through_duplicate_values()
+                .transpose_into_fallible()
+                .map_err({
+                    let db_path = &*self.path;
+                    let name = self.name();
+                    |err| error::IterItem {
+                        db_name: name.to_owned(),
+                        db_path: db_path.to_owned(),
+                        source: err,
+                    }
+                })),
+            Err(err) => Err(error::IterInit {
+                db_name: (*self.name).to_owned(),
+                db_path: (*self.path).to_owned(),
+                source: err,
+            }),
+        }
+    }
+
+    /// Iterate through keys, skipping duplicate values
+    fn rev_iter_through_keys<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        match self.heed_db.rev_iter(rotxn) {
+            Ok(it) => {
+                Ok(it.move_between_keys().transpose_into_fallible().map_err({
+                    let db_path = &*self.path;
+                    let name = self.name();
+                    |err| error::IterItem {
+                        db_name: name.to_owned(),
+                        db_path: db_path.to_owned(),
+                        source: err,
+                    }
+                }))
+            }
             Err(err) => Err(error::IterInit {
                 db_name: (*self.name).to_owned(),
                 db_path: (*self.path).to_owned(),
@@ -594,7 +708,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.iter(rotxn)
+        self.inner.iter_through_keys(rotxn)
     }
 
     pub fn iter_keys<'a, 'txn>(
@@ -608,7 +722,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
         KC: BytesDecode<'txn>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        self.inner.iter_keys(rotxn)
+        self.inner.iter_keys_unique(rotxn)
     }
 
     #[allow(clippy::type_complexity)]
@@ -656,7 +770,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.rev_iter(rotxn)
+        self.inner.rev_iter_through_keys(rotxn)
     }
 
     #[inline(always)]
@@ -861,6 +975,90 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
         self.inner.first(rotxn)
     }
 
+    #[inline(always)]
+    pub fn get<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+        key: &'a KC::EItem,
+    ) -> Result<
+        impl FallibleIterator<Item = DC::DItem, Error = error::IterItem> + 'txn,
+        error::IterDuplicatesInit,
+    >
+    where
+        KC: BytesDecode<'txn> + BytesEncode<'a>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.get_duplicates(rotxn, key)
+    }
+
+    /// Iterate through duplicate values
+    #[inline(always)]
+    pub fn iter_through_duplicate_values<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.iter_through_duplicate_values(rotxn)
+    }
+
+    /// Iterate through keys, skipping duplicate values
+    #[inline(always)]
+    pub fn iter_through_keys<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.iter_through_keys(rotxn)
+    }
+
+    /// Iterate over keys, moving through duplicate values
+    pub fn iter_keys_duplicate<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        LazyDecode<DC>: BytesDecode<'txn>,
+    {
+        self.inner.iter_keys_duplicate(rotxn)
+    }
+
+    /// Iterate over unique keys, ignoring duplicate values
+    pub fn iter_keys_unique<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        LazyDecode<DC>: BytesDecode<'txn>,
+    {
+        self.inner.iter_keys_unique(rotxn)
+    }
+
     #[allow(clippy::type_complexity)]
     #[inline(always)]
     pub fn last<'txn>(
@@ -891,20 +1089,42 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
         &self.inner.name
     }
 
+    /// Iterate through duplicate values
     #[inline(always)]
-    pub fn get<'a, 'txn>(
+    pub fn rev_iter_through_duplicate_values<'a, 'txn>(
         &'a self,
         rotxn: &'txn RoTxn<'a, Tag>,
-        key: &'a KC::EItem,
     ) -> Result<
-        impl FallibleIterator<Item = DC::DItem, Error = error::IterItem> + 'txn,
-        error::IterDuplicatesInit,
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
     >
     where
-        KC: BytesDecode<'txn> + BytesEncode<'a>,
+        KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.inner.get_duplicates(rotxn, key)
+        self.inner.rev_iter_through_duplicate_values(rotxn)
+    }
+
+    /// Iterate through keys, skipping duplicate values
+    #[inline(always)]
+    pub fn rev_iter_through_keys<'a, 'txn>(
+        &'a self,
+        rotxn: &'txn RoTxn<'a, Tag>,
+    ) -> Result<
+        impl FallibleIterator<
+                Item = (KC::DItem, DC::DItem),
+                Error = error::IterItem,
+            > + 'txn,
+        error::IterInit,
+    >
+    where
+        KC: BytesDecode<'txn>,
+        DC: BytesDecode<'txn>,
+    {
+        self.inner.rev_iter_through_keys(rotxn)
     }
 
     #[cfg(feature = "observe")]
