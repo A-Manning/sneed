@@ -13,6 +13,8 @@ use tokio::sync::watch;
 
 use crate::{env, Env, RoTxn, RwTxn};
 
+pub use heed::DatabaseOpenOptions as OpenOptions;
+
 pub mod error;
 pub use error::Error;
 

@@ -133,6 +133,9 @@ pub mod rwtxn {
     }
     pub use error::Error;
 
+    #[cfg(feature = "observe")]
+    type PendingWrites = HashMap<Arc<str>, watch::Sender<()>>;
+
     /// Wrapper for heed's `RwTxn`.
     ///
     /// The type tag can be used to distinguish between different database
@@ -144,19 +147,31 @@ pub mod rwtxn {
         pub(crate) db_dir: &'a Path,
         pub(crate) _tag: std::marker::PhantomData<Tag>,
         #[cfg(feature = "observe")]
-        pub(crate) pending_writes: HashMap<Arc<str>, watch::Sender<()>>,
+        pub(crate) parent_pending_writes: Option<&'a mut PendingWrites>,
+        #[cfg(feature = "observe")]
+        pub(crate) pending_writes: PendingWrites,
     }
 
     impl<Tag> RwTxn<'_, Tag> {
+        pub fn abort(self) {
+            self.inner.abort()
+        }
+
         pub fn commit(self) -> Result<(), error::Commit> {
             let () = self.inner.commit().map_err(|err| error::Commit {
                 db_dir: self.db_dir.to_owned(),
                 source: err,
             })?;
             #[cfg(feature = "observe")]
-            self.pending_writes
-                .iter()
-                .for_each(|(_db_name, watch_tx)| watch_tx.send_replace(()));
+            match self.parent_pending_writes {
+                Some(parent_pending_writes) => {
+                    parent_pending_writes.extend(self.pending_writes)
+                }
+                None => self
+                    .pending_writes
+                    .iter()
+                    .for_each(|(_db_name, watch_tx)| watch_tx.send_replace(())),
+            }
             Ok(())
         }
     }
@@ -181,9 +196,11 @@ pub use rwtxn::{Error as RwTxnError, RwTxn};
 pub mod env {
     use std::{path::Path, sync::Arc};
 
-    use heed::{DatabaseOpenOptions, EnvOpenOptions};
+    use heed::DatabaseOpenOptions;
 
     use crate::{RoTxn, RwTxn};
+
+    pub use heed::EnvOpenOptions as OpenOptions;
 
     pub mod error {
         use std::path::PathBuf;
@@ -195,6 +212,13 @@ pub mod env {
         pub struct CreateDb {
             pub(crate) name: String,
             pub(crate) path: PathBuf,
+            pub(crate) source: heed::Error,
+        }
+
+        #[derive(Debug, Error)]
+        #[error("Error creating nested write txn for database dir `{db_dir}`")]
+        pub struct NestedWriteTxn {
+            pub(crate) db_dir: PathBuf,
             pub(crate) source: heed::Error,
         }
 
@@ -233,6 +257,8 @@ pub mod env {
             #[error(transparent)]
             CreateDb(#[from] CreateDb),
             #[error(transparent)]
+            NestedWriteTxn(#[from] NestedWriteTxn),
+            #[error(transparent)]
             OpenDb(#[from] OpenDb),
             #[error(transparent)]
             OpenEnv(#[from] OpenEnv),
@@ -262,7 +288,7 @@ pub mod env {
         /// # Safety
         /// See [`heed::EnvOpenOptions::open`]
         pub unsafe fn open(
-            opts: &EnvOpenOptions,
+            opts: &OpenOptions,
             path: &Path,
         ) -> Result<Self, error::OpenEnv> {
             let inner = match opts.open(path) {
@@ -305,6 +331,28 @@ pub mod env {
             })
         }
 
+        pub fn nested_write_txn<'p>(
+            &'p self,
+            parent: &'p mut RwTxn<'p, Tag>,
+        ) -> Result<RwTxn<'p, Tag>, error::NestedWriteTxn> {
+            let inner = self
+                .inner
+                .nested_write_txn(&mut parent.inner)
+                .map_err(|err| error::NestedWriteTxn {
+                    db_dir: (*self.path).to_owned(),
+                    source: err,
+                })?;
+            Ok(RwTxn {
+                inner,
+                db_dir: &self.path,
+                _tag: self.tag,
+                #[cfg(feature = "observe")]
+                parent_pending_writes: Some(&mut parent.pending_writes),
+                #[cfg(feature = "observe")]
+                pending_writes: Default::default(),
+            })
+        }
+
         pub fn write_txn(&self) -> Result<RwTxn<'_, Tag>, error::WriteTxn> {
             let inner =
                 self.inner.write_txn().map_err(|err| error::WriteTxn {
@@ -315,6 +363,8 @@ pub mod env {
                 inner,
                 db_dir: &self.path,
                 _tag: self.tag,
+                #[cfg(feature = "observe")]
+                parent_pending_writes: None,
                 #[cfg(feature = "observe")]
                 pending_writes: Default::default(),
             })
