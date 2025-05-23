@@ -333,7 +333,7 @@ pub mod env {
 
         pub fn nested_write_txn<'p>(
             &'p self,
-            parent: &'p mut RwTxn<'p, Tag>,
+            parent: &'p mut RwTxn<'_, Tag>,
         ) -> Result<RwTxn<'p, Tag>, error::NestedWriteTxn> {
             let inner = self
                 .inner
