@@ -78,19 +78,31 @@ pub struct IterItem {
 #[derive(Debug, Error)]
 pub enum IterDuplicates {
     #[error(transparent)]
-    Init(#[from] IterDuplicatesInit),
+    Init(#[from] Box<IterDuplicatesInit>),
     #[error(transparent)]
     Item(#[from] IterItem),
+}
+
+impl From<IterDuplicatesInit> for IterDuplicates {
+    fn from(err: IterDuplicatesInit) -> Self {
+        Self::Init(Box::new(err))
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum Iter {
     #[error(transparent)]
-    DuplicatesInit(#[from] IterDuplicatesInit),
+    DuplicatesInit(#[from] Box<IterDuplicatesInit>),
     #[error(transparent)]
     Init(#[from] IterInit),
     #[error(transparent)]
     Item(#[from] IterItem),
+}
+
+impl From<IterDuplicatesInit> for Iter {
+    fn from(err: IterDuplicatesInit) -> Self {
+        Self::DuplicatesInit(Box::new(err))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -212,9 +224,15 @@ pub struct RangeInit {
 #[derive(Debug, Error)]
 pub enum Range {
     #[error(transparent)]
-    Init(#[from] RangeInit),
+    Init(#[from] Box<RangeInit>),
     #[error(transparent)]
     Item(#[from] IterItem),
+}
+
+impl From<RangeInit> for Range {
+    fn from(err: RangeInit) -> Self {
+        Self::Init(Box::new(err))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -233,7 +251,7 @@ pub struct TryGet {
 #[derive(Debug, Error)]
 pub enum Get {
     #[error(transparent)]
-    TryGet(#[from] TryGet),
+    TryGet(#[from] Box<TryGet>),
     #[error(
         "Missing value from db `{db_name}` at `{db_path}` (key: {})",
         hex::encode(.key_bytes)
@@ -243,6 +261,12 @@ pub enum Get {
         db_path: PathBuf,
         key_bytes: Vec<u8>,
     },
+}
+
+impl From<TryGet> for Get {
+    fn from(err: TryGet) -> Self {
+        Self::TryGet(Box::new(err))
+    }
 }
 
 pub mod inconsistent {
@@ -354,7 +378,7 @@ pub mod inconsistent {
         .0.db1_by,
     )]
     #[repr(transparent)]
-    pub struct And(Inner);
+    pub struct And(Box<Inner>);
 
     impl And {
         #[inline(always)]
@@ -369,7 +393,7 @@ pub mod inconsistent {
             ByDb1::BE:
                 BytesEncode<'a, EItem = <ByDb0::BE as BytesEncode<'a>>::EItem>,
         {
-            Self(Inner::new(on, db0, db1))
+            Self(Box::new(Inner::new(on, db0, db1)))
         }
     }
 
@@ -384,7 +408,7 @@ pub mod inconsistent {
         .0.db1_by,
     )]
     #[repr(transparent)]
-    pub struct Nor(Inner);
+    pub struct Nor(Box<Inner>);
 
     impl Nor {
         #[inline(always)]
@@ -399,7 +423,7 @@ pub mod inconsistent {
             ByDb1::BE:
                 BytesEncode<'a, EItem = <ByDb0::BE as BytesEncode<'a>>::EItem>,
         {
-            Self(Inner::new(on, db0, db1))
+            Self(Box::new(Inner::new(on, db0, db1)))
         }
     }
 
@@ -414,7 +438,7 @@ pub mod inconsistent {
         .0.db1_by,
     )]
     #[repr(transparent)]
-    pub struct Xor(Inner);
+    pub struct Xor(Box<Inner>);
 
     impl Xor {
         #[inline(always)]
@@ -429,7 +453,7 @@ pub mod inconsistent {
             ByDb1::BE:
                 BytesEncode<'a, EItem = <ByDb0::BE as BytesEncode<'a>>::EItem>,
         {
-            Self(Inner::new(on, db0, db1))
+            Self(Box::new(Inner::new(on, db0, db1)))
         }
     }
 
@@ -452,7 +476,7 @@ pub enum Error {
     #[error(transparent)]
     Clear(#[from] Clear),
     #[error(transparent)]
-    Delete(#[from] Delete),
+    Delete(#[from] Box<Delete>),
     #[error(transparent)]
     First(#[from] First),
     #[error(transparent)]
@@ -462,7 +486,7 @@ pub enum Error {
     #[error(transparent)]
     Iter(#[from] Iter),
     #[error(transparent)]
-    IterDuplicatesInit(#[from] IterDuplicatesInit),
+    IterDuplicatesInit(#[from] Box<IterDuplicatesInit>),
     #[error(transparent)]
     IterDuplicates(#[from] IterDuplicates),
     #[error(transparent)]
@@ -474,11 +498,41 @@ pub enum Error {
     #[error(transparent)]
     Len(#[from] Len),
     #[error(transparent)]
-    Put(#[from] Put),
+    Put(#[from] Box<Put>),
     #[error(transparent)]
     Range(#[from] Range),
     #[error(transparent)]
-    RangeInit(#[from] RangeInit),
+    RangeInit(#[from] Box<RangeInit>),
     #[error(transparent)]
-    TryGet(#[from] TryGet),
+    TryGet(#[from] Box<TryGet>),
+}
+
+impl From<Delete> for Error {
+    fn from(err: Delete) -> Self {
+        Self::Delete(Box::new(err))
+    }
+}
+
+impl From<IterDuplicatesInit> for Error {
+    fn from(err: IterDuplicatesInit) -> Self {
+        Self::IterDuplicatesInit(Box::new(err))
+    }
+}
+
+impl From<Put> for Error {
+    fn from(err: Put) -> Self {
+        Self::Put(Box::new(err))
+    }
+}
+
+impl From<RangeInit> for Error {
+    fn from(err: RangeInit) -> Self {
+        Self::RangeInit(Box::new(err))
+    }
+}
+
+impl From<TryGet> for Error {
+    fn from(err: TryGet) -> Self {
+        Self::TryGet(Box::new(err))
+    }
 }
