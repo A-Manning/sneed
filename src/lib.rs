@@ -315,7 +315,8 @@ pub mod env {
         #[inline(always)]
         pub(crate) fn database_options(
             &self,
-        ) -> DatabaseOpenOptions<heed::Unspecified, heed::Unspecified> {
+        ) -> DatabaseOpenOptions<'_, '_, heed::Unspecified, heed::Unspecified>
+        {
             self.inner.database_options()
         }
 

@@ -138,6 +138,85 @@ pub struct Put {
     pub(crate) source: heed::Error,
 }
 
+fn display_range_bytes(
+    start_bound: &Result<std::ops::Bound<Vec<u8>>, heed::BoxedError>,
+    end_bound: &Result<std::ops::Bound<Vec<u8>>, heed::BoxedError>,
+) -> String {
+    use std::ops::Bound;
+    let start_bound = match start_bound {
+        Ok(start_bound) => start_bound,
+        Err(encode_err) => {
+            return format!(
+            "key encoding failed for range start with error `{encode_err:#}`"
+        )
+        }
+    };
+    let end_bound = match end_bound {
+        Ok(end_bound) => end_bound,
+        Err(encode_err) => {
+            return format!(
+                "key encoding failed for range end with error `{encode_err:#}`"
+            )
+        }
+    };
+    match (start_bound, end_bound) {
+        (Bound::Excluded(start), Bound::Excluded(end)) => {
+            format!("`({})..{}`", hex::encode(start), hex::encode(end))
+        }
+        (Bound::Excluded(start), Bound::Included(end)) => {
+            format!("`({})..={}`", hex::encode(start), hex::encode(end))
+        }
+        (Bound::Excluded(start), Bound::Unbounded) => {
+            format!("`({})..`", hex::encode(start))
+        }
+        (Bound::Included(start), Bound::Excluded(end)) => {
+            format!("`{}..{}`", hex::encode(start), hex::encode(end))
+        }
+        (Bound::Included(start), Bound::Included(end)) => {
+            format!("`{}..={}`", hex::encode(start), hex::encode(end))
+        }
+        (Bound::Included(start), Bound::Unbounded) => {
+            format!("`{}..`", hex::encode(start))
+        }
+        (Bound::Unbounded, Bound::Excluded(end)) => {
+            format!("`..{}`", hex::encode(end))
+        }
+        (Bound::Unbounded, Bound::Included(end)) => {
+            format!("`..={}`", hex::encode(end))
+        }
+        (Bound::Unbounded, Bound::Unbounded) => "`..`".to_owned(),
+    }
+}
+
+#[derive(Debug, Error)]
+#[error(
+    "Failed to initialize read-only iterator for db `{}` at `{}` over range ({})",
+    .db_name,
+    .db_path.display(),
+    display_range_bytes(.range_start_bytes, .range_end_bytes)
+)]
+pub struct RangeInit {
+    pub(crate) db_name: String,
+    pub(crate) db_path: PathBuf,
+    pub(crate) range_start_bytes: Result<
+        std::ops::Bound<Vec<u8>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    >,
+    pub(crate) range_end_bytes: Result<
+        std::ops::Bound<Vec<u8>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    >,
+    pub(crate) source: Box<heed::Error>,
+}
+
+#[derive(Debug, Error)]
+pub enum Range {
+    #[error(transparent)]
+    Init(#[from] RangeInit),
+    #[error(transparent)]
+    Item(#[from] IterItem),
+}
+
 #[derive(Debug, Error)]
 #[error(
     "Failed to read from db `{db_name}` at `{db_path}` ({})",
@@ -396,6 +475,10 @@ pub enum Error {
     Len(#[from] Len),
     #[error(transparent)]
     Put(#[from] Put),
+    #[error(transparent)]
+    Range(#[from] Range),
+    #[error(transparent)]
+    RangeInit(#[from] RangeInit),
     #[error(transparent)]
     TryGet(#[from] TryGet),
 }
