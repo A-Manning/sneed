@@ -19,8 +19,14 @@ use crate::{db::error, env, Env, RoTxn, RwTxn};
 /// created/opened by the same `Env`.
 #[derive(Educe)]
 #[educe(Clone(bound()), Debug(bound()))]
-pub(crate) struct DbWrapper<KC, DC, Tag, C = DefaultComparator> {
-    heed_db: heed::Database<KC, DC, C>,
+pub(crate) struct DbWrapper<
+    KC,
+    DC,
+    Tag,
+    C = DefaultComparator,
+    CDUP = DefaultComparator,
+> {
+    heed_db: heed::Database<KC, DC, C, CDUP>,
     pub name: Arc<str>,
     path: Arc<Path>,
     tag: std::marker::PhantomData<Tag>,
@@ -28,7 +34,7 @@ pub(crate) struct DbWrapper<KC, DC, Tag, C = DefaultComparator> {
     watch: (watch::Sender<()>, watch::Receiver<()>),
 }
 
-impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
+impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
     /// Deletes all key/value pairs in this database.
     pub fn clear(
         &self,
@@ -50,8 +56,8 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     }
 
     /// Create a DB, if it does not already exist, and open it if it does.
-    pub fn create(
-        env: &Env<Tag>,
+    pub fn create<T>(
+        env: &Env<T, Tag>,
         rwtxn: &mut RwTxn<'_, Tag>,
         name: &str,
         flags: Option<DatabaseFlags>,
@@ -60,9 +66,14 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         KC: 'static,
         DC: 'static,
         C: Comparator + 'static,
+        CDUP: Comparator + 'static,
     {
-        let mut db_opts =
-            env.database_options().name(name).types().key_comparator();
+        let mut db_opts = env
+            .database_options()
+            .name(name)
+            .types()
+            .key_comparator()
+            .dup_sort_comparator();
         if let Some(flags) = flags {
             db_opts.flags(flags);
         }
@@ -88,7 +99,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// The stored value is not decoded, if it exists.
     pub fn contains_key<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<bool, error::TryGet>
     where
@@ -168,7 +179,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     #[allow(clippy::type_complexity)]
     pub fn first<'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::First>
     where
         KC: BytesDecode<'txn>,
@@ -183,7 +194,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
 
     pub fn get_duplicates<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<
         impl FallibleIterator<Item = DC::DItem, Error = error::IterItem> + 'txn,
@@ -226,7 +237,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate through duplicate values
     pub fn iter_through_duplicate_values<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -262,7 +273,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate through keys, skipping duplicate values
     pub fn iter_through_keys<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -297,7 +308,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate over keys, moving through duplicate values
     pub fn iter_keys_duplicate<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
@@ -331,7 +342,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate over unique keys, ignoring duplicate values
     pub fn iter_keys_unique<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
@@ -365,7 +376,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     #[allow(clippy::type_complexity)]
     pub fn last<'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
     where
         KC: BytesDecode<'txn>,
@@ -390,7 +401,10 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         }
     }
 
-    pub fn len(&self, rotxn: &RoTxn<'_, Tag>) -> Result<u64, error::Len> {
+    pub fn len(
+        &self,
+        rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
+    ) -> Result<u64, error::Len> {
         self.heed_db.len(rotxn).map_err(|err| error::Len {
             db_name: (*self.name).to_owned(),
             db_path: (*self.path).to_owned(),
@@ -403,9 +417,9 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     }
 
     /// Open a DB that already exists.
-    pub fn open(
-        env: &Env<Tag>,
-        rotxn: &RoTxn<'_, Tag>,
+    pub fn open<T>(
+        env: &Env<T, Tag>,
+        rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
         name: &str,
         flags: Option<DatabaseFlags>,
     ) -> Result<Option<Self>, env::error::OpenDb>
@@ -413,9 +427,14 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
         KC: 'static,
         DC: 'static,
         C: Comparator + 'static,
+        CDUP: Comparator + 'static,
     {
-        let mut db_opts =
-            env.database_options().name(name).types().key_comparator();
+        let mut db_opts = env
+            .database_options()
+            .name(name)
+            .types()
+            .key_comparator()
+            .dup_sort_comparator();
         if let Some(flags) = flags {
             db_opts.flags(flags);
         }
@@ -476,7 +495,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate over values in a range, through duplicate values
     pub fn range_through_duplicate_values<'a, 'range, 'txn, R>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         range: &'range R,
     ) -> Result<
         impl FallibleIterator<
@@ -531,7 +550,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate over values in a range, skipping duplicate keys
     pub fn range_through_keys<'a, 'range, 'txn, R>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         range: &'range R,
     ) -> Result<
         impl FallibleIterator<
@@ -585,7 +604,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate through duplicate values
     pub fn rev_iter_through_duplicate_values<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -621,7 +640,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
     /// Iterate through keys, skipping duplicate values
     pub fn rev_iter_through_keys<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -655,7 +674,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
 
     pub fn try_get<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<Option<DC::DItem>, error::TryGet>
     where
@@ -676,7 +695,7 @@ impl<KC, DC, Tag, C> DbWrapper<KC, DC, Tag, C> {
 
     pub fn get<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<DC::DItem, error::Get>
     where

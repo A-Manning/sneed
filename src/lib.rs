@@ -82,12 +82,12 @@ pub mod rotxn {
     /// ensuring that txns created in an `Env` can only be used for DBs
     /// created/opened by the same `Env`.
     #[repr(transparent)]
-    pub struct RoTxn<'a, Tag = ()> {
-        pub(crate) inner: heed::RoTxn<'a>,
+    pub struct RoTxn<'a, T = heed::AnyTls, Tag = ()> {
+        pub(crate) inner: heed::RoTxn<'a, T>,
         pub(crate) _tag: std::marker::PhantomData<Tag>,
     }
 
-    impl<Tag> RoTxn<'_, Tag> {
+    impl<T, Tag> RoTxn<'_, T, Tag> {
         pub fn commit(self) -> Result<(), error::Commit> {
             self.inner
                 .commit()
@@ -95,8 +95,8 @@ pub mod rotxn {
         }
     }
 
-    impl<'rwtxn, Tag> std::ops::Deref for RoTxn<'rwtxn, Tag> {
-        type Target = heed::RoTxn<'rwtxn>;
+    impl<'rwtxn, T, Tag> std::ops::Deref for RoTxn<'rwtxn, T, Tag> {
+        type Target = heed::RoTxn<'rwtxn, T>;
         fn deref(&self) -> &Self::Target {
             &self.inner
         }
@@ -177,7 +177,7 @@ pub mod rwtxn {
     }
 
     impl<'rwtxn, Tag> std::ops::Deref for RwTxn<'rwtxn, Tag> {
-        type Target = crate::RoTxn<'rwtxn, Tag>;
+        type Target = crate::RoTxn<'rwtxn, heed::WithoutTls, Tag>;
         fn deref(&self) -> &Self::Target {
             let inner: &heed::RoTxn<'rwtxn> = &self.inner;
             // This is safe because RoTxn is just a wrapper around heed::RoTxn
@@ -278,35 +278,13 @@ pub mod env {
     /// created/opened by the same `Env`.
     #[derive(educe::Educe)]
     #[educe(Clone(bound()), Debug(bound()))]
-    pub struct Env<Tag = ()> {
-        inner: heed::Env,
+    pub struct Env<T = heed::WithTls, Tag = ()> {
+        inner: heed::Env<T>,
         path: Arc<Path>,
         pub(crate) tag: std::marker::PhantomData<Tag>,
     }
 
-    impl<Tag> Env<Tag> {
-        /// # Safety
-        /// See [`heed::EnvOpenOptions::open`]
-        pub unsafe fn open(
-            opts: &OpenOptions,
-            path: &Path,
-        ) -> Result<Self, error::OpenEnv> {
-            let inner = match opts.open(path) {
-                Ok(env) => env,
-                Err(err) => {
-                    return Err(error::OpenEnv {
-                        path: path.to_owned(),
-                        source: err,
-                    })
-                }
-            };
-            Ok(Self {
-                inner,
-                path: Arc::from(path),
-                tag: std::marker::PhantomData,
-            })
-        }
-
+    impl<T, Tag> Env<T, Tag> {
         #[inline(always)]
         pub fn path(&self) -> &Arc<Path> {
             &self.path
@@ -315,12 +293,12 @@ pub mod env {
         #[inline(always)]
         pub(crate) fn database_options(
             &self,
-        ) -> DatabaseOpenOptions<'_, '_, heed::Unspecified, heed::Unspecified>
+        ) -> DatabaseOpenOptions<'_, '_, T, heed::Unspecified, heed::Unspecified>
         {
             self.inner.database_options()
         }
 
-        pub fn read_txn(&self) -> Result<RoTxn<'_, Tag>, error::ReadTxn> {
+        pub fn read_txn(&self) -> Result<RoTxn<'_, T, Tag>, error::ReadTxn> {
             let inner =
                 self.inner.read_txn().map_err(|err| error::ReadTxn {
                     db_dir: (*self.path).to_owned(),
@@ -368,6 +346,33 @@ pub mod env {
                 parent_pending_writes: None,
                 #[cfg(feature = "observe")]
                 pending_writes: Default::default(),
+            })
+        }
+    }
+
+    impl<T, Tag> Env<T, Tag>
+    where
+        T: heed::TlsUsage,
+    {
+        /// # Safety
+        /// See [`heed::EnvOpenOptions::open`]
+        pub unsafe fn open(
+            opts: &OpenOptions<T>,
+            path: &Path,
+        ) -> Result<Self, error::OpenEnv> {
+            let inner = match opts.open(path) {
+                Ok(env) => env,
+                Err(err) => {
+                    return Err(error::OpenEnv {
+                        path: path.to_owned(),
+                        source: err,
+                    })
+                }
+            };
+            Ok(Self {
+                inner,
+                path: Arc::from(path),
+                tag: std::marker::PhantomData,
             })
         }
     }

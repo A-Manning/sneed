@@ -43,17 +43,23 @@ where
 /// created/opened by the same `Env`.
 #[derive(Educe)]
 #[educe(Clone(bound()), Debug(bound()))]
-pub struct RoDatabaseUnique<KC, DC, Tag = (), C = DefaultComparator> {
-    inner: wrapper::DbWrapper<KC, DC, Tag, C>,
+pub struct RoDatabaseUnique<
+    KC,
+    DC,
+    Tag = (),
+    C = DefaultComparator,
+    CDUP = DefaultComparator,
+> {
+    inner: wrapper::DbWrapper<KC, DC, Tag, C, CDUP>,
 }
 
-impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
+impl<KC, DC, Tag, C, CDUP> RoDatabaseUnique<KC, DC, Tag, C, CDUP> {
     /// Check if the provided key exists in the db.
     /// The stored value is not decoded, if it exists.
     #[inline(always)]
     pub fn contains_key<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<bool, error::TryGet>
     where
@@ -67,7 +73,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn first<'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::First>
     where
         KC: BytesDecode<'txn>,
@@ -79,7 +85,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn iter<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -96,7 +102,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
 
     pub fn iter_keys<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
@@ -112,7 +118,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn last<'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
     where
         KC: BytesDecode<'txn>,
@@ -129,7 +135,10 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     }
 
     #[inline(always)]
-    pub fn len(&self, rotxn: &RoTxn<'_, Tag>) -> Result<u64, error::Len> {
+    pub fn len(
+        &self,
+        rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
+    ) -> Result<u64, error::Len> {
         self.inner.len(rotxn)
     }
 
@@ -141,7 +150,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn range<'a, 'range, 'txn, R>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         range: &'range R,
     ) -> Result<
         impl FallibleIterator<
@@ -162,7 +171,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn rev_iter<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -180,7 +189,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn try_get<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<Option<DC::DItem>, error::TryGet>
     where
@@ -193,7 +202,7 @@ impl<KC, DC, Tag, C> RoDatabaseUnique<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn get<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<DC::DItem, error::Get>
     where
@@ -230,7 +239,7 @@ impl<KC, DC, Tag, C> Database for RoDatabaseUnique<KC, DC, Tag, C> {
 #[educe(Clone(bound()), Debug(bound()))]
 #[repr(transparent)]
 pub struct DatabaseUnique<KC, DC, Tag = (), C = DefaultComparator> {
-    inner: RoDatabaseUnique<KC, DC, Tag, C>,
+    inner: RoDatabaseUnique<KC, DC, Tag, C, DefaultComparator>,
 }
 
 impl<KC, DC, Tag, C> DatabaseUnique<KC, DC, Tag, C> {
@@ -242,8 +251,8 @@ impl<KC, DC, Tag, C> DatabaseUnique<KC, DC, Tag, C> {
         self.inner.inner.clear(rwtxn)
     }
 
-    pub fn create(
-        env: &Env<Tag>,
+    pub fn create<T>(
+        env: &Env<T, Tag>,
         rwtxn: &mut RwTxn<'_, Tag>,
         name: &str,
     ) -> Result<Self, env::error::CreateDb>
@@ -277,9 +286,9 @@ impl<KC, DC, Tag, C> DatabaseUnique<KC, DC, Tag, C> {
         }
     }
 
-    pub fn open(
-        env: &Env<Tag>,
-        rotxn: &RoTxn<'_, Tag>,
+    pub fn open<T>(
+        env: &Env<T, Tag>,
+        rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
         name: &str,
     ) -> Result<Option<Self>, env::error::OpenDb>
     where
@@ -348,17 +357,23 @@ impl<KC, DC, Tag, C> std::ops::Deref for DatabaseUnique<KC, DC, Tag, C> {
 /// created/opened by the same `Env`.
 #[derive(Educe)]
 #[educe(Clone, Debug)]
-pub struct RoDatabaseDup<KC, DC, Tag = (), C = DefaultComparator> {
-    inner: wrapper::DbWrapper<KC, DC, Tag, C>,
+pub struct RoDatabaseDup<
+    KC,
+    DC,
+    Tag = (),
+    C = DefaultComparator,
+    CDUP = DefaultComparator,
+> {
+    inner: wrapper::DbWrapper<KC, DC, Tag, C, CDUP>,
 }
 
-impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
+impl<KC, DC, Tag, C, CDUP> RoDatabaseDup<KC, DC, Tag, C, CDUP> {
     /// Check if the provided key exists in the db.
     /// The stored value is not decoded, if it exists.
     #[inline(always)]
     pub fn contains_key<'a, 'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<bool, error::TryGet>
     where
@@ -372,7 +387,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn first<'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::First>
     where
         KC: BytesDecode<'txn>,
@@ -384,7 +399,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn get<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         key: &'a KC::EItem,
     ) -> Result<
         impl FallibleIterator<Item = DC::DItem, Error = error::IterItem> + 'txn,
@@ -401,7 +416,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn iter_through_duplicate_values<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -420,7 +435,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn iter_through_keys<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -438,7 +453,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     /// Iterate over keys, moving through duplicate values
     pub fn iter_keys_duplicate<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
@@ -453,7 +468,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     /// Iterate over unique keys, ignoring duplicate values
     pub fn iter_keys_unique<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<Item = KC::DItem, Error = error::IterItem> + 'txn,
         error::IterInit,
@@ -469,7 +484,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn last<'txn>(
         &self,
-        rotxn: &'txn RoTxn<'_, Tag>,
+        rotxn: &'txn RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<Option<(KC::DItem, DC::DItem)>, error::Last>
     where
         KC: BytesDecode<'txn>,
@@ -486,7 +501,10 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     }
 
     #[inline(always)]
-    pub fn len(&self, rotxn: &RoTxn<'_, Tag>) -> Result<u64, error::Len> {
+    pub fn len(
+        &self,
+        rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
+    ) -> Result<u64, error::Len> {
         self.inner.len(rotxn)
     }
 
@@ -499,7 +517,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn range_through_duplicate_values<'a, 'range, 'txn, R>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         range: &'range R,
     ) -> Result<
         impl FallibleIterator<
@@ -521,7 +539,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn range_through_keys<'a, 'range, 'txn, R>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
         range: &'range R,
     ) -> Result<
         impl FallibleIterator<
@@ -543,7 +561,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn rev_iter_through_duplicate_values<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -562,7 +580,7 @@ impl<KC, DC, Tag, C> RoDatabaseDup<KC, DC, Tag, C> {
     #[inline(always)]
     pub fn rev_iter_through_keys<'a, 'txn>(
         &'a self,
-        rotxn: &'txn RoTxn<'a, Tag>,
+        rotxn: &'txn RoTxn<'a, heed::AnyTls, Tag>,
     ) -> Result<
         impl FallibleIterator<
                 Item = (KC::DItem, DC::DItem),
@@ -603,13 +621,19 @@ impl<KC, DC, Tag, C> Database for RoDatabaseDup<KC, DC, Tag, C> {
 #[derive(Educe)]
 #[educe(Clone, Debug)]
 #[repr(transparent)]
-pub struct DatabaseDup<KC, DC, Tag = (), C = DefaultComparator> {
-    inner: RoDatabaseDup<KC, DC, Tag, C>,
+pub struct DatabaseDup<
+    KC,
+    DC,
+    Tag = (),
+    C = DefaultComparator,
+    CDUP = DefaultComparator,
+> {
+    inner: RoDatabaseDup<KC, DC, Tag, C, CDUP>,
 }
 
-impl<KC, DC, Tag, C> DatabaseDup<KC, DC, Tag, C> {
-    pub fn create(
-        env: &Env<Tag>,
+impl<KC, DC, Tag, C, CDUP> DatabaseDup<KC, DC, Tag, C, CDUP> {
+    pub fn create<T>(
+        env: &Env<T, Tag>,
         rwtxn: &mut RwTxn<'_, Tag>,
         name: &str,
     ) -> Result<Self, env::error::CreateDb>
@@ -617,6 +641,7 @@ impl<KC, DC, Tag, C> DatabaseDup<KC, DC, Tag, C> {
         KC: 'static,
         DC: 'static,
         C: Comparator + 'static,
+        CDUP: Comparator + 'static,
     {
         let flags = DatabaseFlags::DUP_SORT;
         let db_wrapper =
@@ -661,15 +686,16 @@ impl<KC, DC, Tag, C> DatabaseDup<KC, DC, Tag, C> {
         }
     }
 
-    pub fn open(
-        env: &Env<Tag>,
-        rotxn: &RoTxn<'_, Tag>,
+    pub fn open<T>(
+        env: &Env<T, Tag>,
+        rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
         name: &str,
     ) -> Result<Option<Self>, env::error::OpenDb>
     where
         KC: 'static,
         DC: 'static,
         C: Comparator + 'static,
+        CDUP: Comparator + 'static,
     {
         let flags = DatabaseFlags::DUP_SORT;
         let Some(db_wrapper) =
