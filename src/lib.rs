@@ -5,6 +5,8 @@
 use heed::{BytesDecode, BytesEncode};
 use thiserror::Error;
 
+pub mod codec;
+
 const UNIT_KEY_ENCODED: u8 = 0x69;
 
 #[derive(Debug, Error)]
