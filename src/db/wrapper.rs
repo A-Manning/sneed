@@ -106,7 +106,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesEncode<'a>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        match self.heed_db.lazily_decode_data().get(rotxn, key) {
+        match self.heed_db.lazily_decode_data().get(rotxn.as_ref(), key) {
             Ok(lazy_value) => Ok(lazy_value.is_some()),
             Err(err) => {
                 let key_bytes = <KC as BytesEncode>::bytes_encode(key)
@@ -185,7 +185,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.heed_db.first(rotxn).map_err(|err| error::First {
+        self.heed_db.first(rotxn.as_ref()).map_err(|err| error::First {
             db_name: (*self.name).to_owned(),
             db_path: (*self.path).to_owned(),
             source: err,
@@ -204,7 +204,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn> + BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.get_duplicates(rotxn, key) {
+        match self.heed_db.get_duplicates(rotxn.as_ref(), key) {
             Ok(it) => Ok(it
                 .into_iter()
                 .flatten()
@@ -249,7 +249,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.iter(rotxn) {
+        match self.heed_db.iter(rotxn.as_ref()) {
             Ok(it) => Ok(it
                 .move_through_duplicate_values()
                 .transpose_into_fallible()
@@ -285,7 +285,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.iter(rotxn) {
+        match self.heed_db.iter(rotxn.as_ref()) {
             Ok(it) => {
                 Ok(it.move_between_keys().transpose_into_fallible().map_err({
                     let db_path = &*self.path;
@@ -317,7 +317,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        match self.heed_db.lazily_decode_data().iter(rotxn) {
+        match self.heed_db.lazily_decode_data().iter(rotxn.as_ref()) {
             Ok(it) => Ok(it
                 .move_through_duplicate_values()
                 .transpose_into_fallible()
@@ -351,7 +351,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         LazyDecode<DC>: BytesDecode<'txn>,
     {
-        match self.heed_db.lazily_decode_data().iter(rotxn) {
+        match self.heed_db.lazily_decode_data().iter(rotxn.as_ref()) {
             Ok(it) => Ok(it
                 .move_between_keys()
                 .transpose_into_fallible()
@@ -382,7 +382,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        self.heed_db.last(rotxn).map_err(|err| error::Last {
+        self.heed_db.last(rotxn.as_ref()).map_err(|err| error::Last {
             db_name: (*self.name).to_owned(),
             db_path: (*self.path).to_owned(),
             source: err,
@@ -405,7 +405,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         &self,
         rotxn: &RoTxn<'_, heed::AnyTls, Tag>,
     ) -> Result<u64, error::Len> {
-        self.heed_db.len(rotxn).map_err(|err| error::Len {
+        self.heed_db.len(rotxn.as_ref()).map_err(|err| error::Len {
             db_name: (*self.name).to_owned(),
             db_path: (*self.path).to_owned(),
             source: err,
@@ -440,7 +440,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         }
         let path = env.path().clone();
         let Some(heed_db) =
-            db_opts.open(rotxn).map_err(|err| env::error::OpenDb {
+            db_opts.open(rotxn.as_ref()).map_err(|err| env::error::OpenDb {
                 name: name.to_owned(),
                 path: (*path).to_owned(),
                 source: err,
@@ -510,7 +510,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         R: std::ops::RangeBounds<KC::EItem>,
         C: Comparator,
     {
-        match self.heed_db.range(rotxn, range) {
+        match self.heed_db.range(rotxn.as_ref(), range) {
             Ok(it) => Ok(it
                 .move_through_duplicate_values()
                 .transpose_into_fallible()
@@ -565,7 +565,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         R: std::ops::RangeBounds<KC::EItem>,
         C: Comparator,
     {
-        match self.heed_db.range(rotxn, range) {
+        match self.heed_db.range(rotxn.as_ref(), range) {
             Ok(it) => {
                 Ok(it.move_between_keys().transpose_into_fallible().map_err({
                     let db_path = &*self.path;
@@ -616,7 +616,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.rev_iter(rotxn) {
+        match self.heed_db.rev_iter(rotxn.as_ref()) {
             Ok(it) => Ok(it
                 .move_through_duplicate_values()
                 .transpose_into_fallible()
@@ -652,7 +652,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesDecode<'txn>,
         DC: BytesDecode<'txn>,
     {
-        match self.heed_db.rev_iter(rotxn) {
+        match self.heed_db.rev_iter(rotxn.as_ref()) {
             Ok(it) => {
                 Ok(it.move_between_keys().transpose_into_fallible().map_err({
                     let db_path = &*self.path;
@@ -681,7 +681,7 @@ impl<KC, DC, Tag, C, CDUP> DbWrapper<KC, DC, Tag, C, CDUP> {
         KC: BytesEncode<'a>,
         DC: BytesDecode<'txn>,
     {
-        self.heed_db.get(rotxn, key).map_err(|err| {
+        self.heed_db.get(rotxn.as_ref(), key).map_err(|err| {
             let key_bytes = <KC as BytesEncode>::bytes_encode(key)
                 .map(|key_bytes| key_bytes.to_vec());
             error::TryGet {
